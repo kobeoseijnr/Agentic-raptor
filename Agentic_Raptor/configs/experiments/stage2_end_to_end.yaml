@@ -1,0 +1,96 @@
+# Stage 2 — full end-to-end (Smoke C): real multimodal LLM + real ngspice.
+# Requires BOTH ngspice and the provider credential. Never silently degrades:
+# missing ngspice → structured simulator_unavailable failures;
+# missing credential → structured missing_credential generation failures.
+seed: 17
+device: cpu
+output_dir: ../../outputs/stage2_end_to_end
+
+logging:
+  level: INFO
+  decision_log: ../../outputs/stage2_end_to_end/decisions.jsonl
+
+specification:
+  text: |
+    Design a low-power OTA in a generic process, supply 1.8 V.
+    Gain >= 45 dB, GBW >= 5 MHz, phase margin >= 55 deg, power <= 1 mW,
+    load capacitance 1 pF.
+  structured_specification_path: inputs/stage2_spec.yaml
+  defaults:
+    temperature_c: 27.0
+
+llm:
+  generator: llm
+  real_llm_enabled: true
+  provider: openai_compatible
+  model_name: gpt-4o-mini
+  api_key_env: OPENAI_API_KEY
+  base_url_env: AGENTIC_RAPTOR_LLM_BASE_URL
+  provider_timeout_s: 120.0
+  provider_retries: 1
+  image_parsing_enabled: false
+  number_of_candidates: 1
+  max_retries: 2
+
+spice:
+  simulator: ngspice
+  ngspice_exe: null
+  analyses: [op, ac]
+  timeout_s: 60.0
+  cache_path: ../../outputs/stage2_end_to_end/spice_cache.jsonl
+  cache_enabled: true
+  model_library_path: null
+  technology_label: generic_1u_level1
+  allow_mock_fallback: false
+  pvt_corners: 2
+
+policy_value:
+  hidden_dim: 32
+  encoder: pooled
+  batch_size: 8
+  updates_per_episode: 2
+  require_spice_for_training: true
+
+sac:
+  hidden_dim: 32
+  batch_size: 8
+  updates_per_episode: 2
+  dynamics_updates_per_episode: 2
+  sizing_steps: 4
+  dynamics_ensemble_size: 2
+  real_spice_warmup_transitions: 2
+  dynamics_uncertainty_threshold: 0.5
+  real_query_interval: 2
+
+budgets:
+  max_topology_edits: 3
+  max_sizing_steps: 6
+  max_spice_calls: 24
+  max_runtime_s: 900.0
+  max_generations: 2
+  max_retrievals: 3
+
+reward_weights:
+  feasibility_weight: 1.0
+  fom_weight: 0.5
+  pvt_weight: 0.3
+  spice_cost_weight: 0.1
+  runtime_weight: 0.05
+  invalidity_weight: 0.5
+  validity_weight: 0.2
+  sizing_progress_weight: 0.2
+  fom_scale: 200.0
+  credit_gamma: 0.97
+  shaping_blend: 0.0
+
+rag:
+  persist_path: null
+  top_k: 3
+  seed_corpus: true
+  include_failures: true
+
+coordinator:
+  accept_reward_threshold: 0.5
+  stagnation_patience: 2
+  max_repeated_failures: 3
+  max_decisions: 30

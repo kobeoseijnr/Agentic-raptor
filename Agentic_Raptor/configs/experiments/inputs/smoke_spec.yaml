@@ -1,0 +1,9 @@
+# Structured specification (highest fusion priority).
+circuit_class: ota
+technology: 180nm
+supply_voltage: 1.8
+target_gain_db: 72
+target_gbw_hz: 60e6
+minimum_phase_margin_deg: 60
+maximum_power_w: 1.0e-3
+load_capacitance_f: 1.0e-12

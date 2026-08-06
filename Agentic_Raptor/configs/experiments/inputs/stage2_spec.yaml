@@ -1,0 +1,9 @@
+# Stage 2 end-to-end target specification (relaxed for the generic LEVEL=1 library).
+circuit_class: ota
+technology: generic
+supply_voltage: 1.8
+target_gain_db: 45
+target_gbw_hz: 5e6
+minimum_phase_margin_deg: 55
+maximum_power_w: 1.0e-3
+load_capacitance_f: 1.0e-12

@@ -1,0 +1,5 @@
+schema_version: 3e2.1
+train_seeds: [0, 1]
+test_seed: 2
+gate_pm_err_deg: 15.0
+ensemble: 2

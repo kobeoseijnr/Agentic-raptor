@@ -1,0 +1,97 @@
+# Stage 2 — real ngspice path (Smoke A / real-SPICE episodes).
+# Requires ngspice; does NOT require any LLM credentials (mock generator).
+seed: 11
+device: cpu
+output_dir: ../../outputs/stage2_real_spice
+
+logging:
+  level: INFO
+  decision_log: ../../outputs/stage2_real_spice/decisions.jsonl
+
+specification:
+  structured_specification_path: inputs/smoke_spec.yaml
+  table_path: inputs/smoke_table.csv
+  netlist_path: inputs/smoke_reference.sp
+  defaults:
+    temperature_c: 27.0
+
+actions:
+  max_edits: 3
+  max_actions: 24
+  invalid_action_penalty: -0.5
+
+mcts:
+  num_simulations: 12
+  c_puct: 1.5
+  max_depth: 3
+
+policy_value:
+  hidden_dim: 32
+  encoder: pooled
+  lr: 0.001
+  batch_size: 8
+  updates_per_episode: 2
+  require_spice_for_training: true    # only SPICE-grounded trajectories train topology nets
+
+sac:
+  hidden_dim: 32
+  lr: 0.001
+  batch_size: 8
+  updates_per_episode: 2
+  dynamics_updates_per_episode: 2
+  sizing_steps: 4
+  dynamics_ensemble_size: 2
+  real_spice_warmup_transitions: 2
+  dynamics_uncertainty_threshold: 0.5
+  real_query_interval: 2
+
+spice:
+  simulator: ngspice          # real backend; discovery via PATH when exe null
+  ngspice_exe: null
+  analyses: [op, ac]
+  timeout_s: 60.0
+  cache_path: ../../outputs/stage2_real_spice/spice_cache.jsonl
+  cache_enabled: true
+  model_library_path: null    # built-in generic LEVEL=1 library
+  technology_label: generic_1u_level1
+  keep_workdirs: false
+  allow_mock_fallback: false  # never silently fall back to mock
+  pvt_corners: 3
+
+budgets:
+  max_topology_edits: 3
+  max_sizing_steps: 6
+  max_spice_calls: 20
+  max_runtime_s: 600.0
+  max_generations: 2
+  max_retrievals: 3
+
+reward_weights:
+  feasibility_weight: 1.0
+  fom_weight: 0.5
+  pvt_weight: 0.3
+  spice_cost_weight: 0.1
+  runtime_weight: 0.05
+  invalidity_weight: 0.5
+  validity_weight: 0.2
+  sizing_progress_weight: 0.2
+  fom_scale: 200.0
+  credit_gamma: 0.97
+  shaping_blend: 0.0
+
+rag:
+  persist_path: null
+  top_k: 3
+  seed_corpus: true
+  include_failures: true
+
+llm:
+  generator: mock             # this config exercises real SPICE, not the real LLM
+  number_of_candidates: 2
+  max_retries: 1
+
+coordinator:
+  accept_reward_threshold: 0.5
+  stagnation_patience: 2
+  max_repeated_failures: 3
+  max_decisions: 30

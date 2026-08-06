@@ -1,0 +1,287 @@
+{
+ "semantic_version": "verified_subgnode_v2",
+ "source_file": "repositories/CktGNN/OCB/src/circuit_generation.py",
+ "source_symbols": {
+  "NODE_TYPE": "L33-43",
+  "SUBG_NODE": "L46-70"
+ },
+ "node_type": {
+  "R": 0,
+  "C": 1,
+  "+gm+": 2,
+  "-gm+": 3,
+  "+gm-": 4,
+  "-gm-": 5,
+  "sudo_in": 6,
+  "sudo_out": 7,
+  "In": 8,
+  "Out": 9
+ },
+ "subg_node_basis": [
+  {
+   "raw_code": 0,
+   "components": [
+    "In"
+   ],
+   "gm_polarity": null,
+   "path_class": "passive",
+   "connectivity": "single"
+  },
+  {
+   "raw_code": 1,
+   "components": [
+    "Out"
+   ],
+   "gm_polarity": null,
+   "path_class": "passive",
+   "connectivity": "single"
+  },
+  {
+   "raw_code": 2,
+   "components": [
+    "R"
+   ],
+   "gm_polarity": null,
+   "path_class": "passive",
+   "connectivity": "single"
+  },
+  {
+   "raw_code": 3,
+   "components": [
+    "C"
+   ],
+   "gm_polarity": null,
+   "path_class": "passive",
+   "connectivity": "single"
+  },
+  {
+   "raw_code": 4,
+   "components": [
+    "R",
+    "C"
+   ],
+   "gm_polarity": null,
+   "path_class": "passive",
+   "connectivity": "parallel"
+  },
+  {
+   "raw_code": 5,
+   "components": [
+    "R",
+    "C"
+   ],
+   "gm_polarity": null,
+   "path_class": "passive",
+   "connectivity": "series"
+  },
+  {
+   "raw_code": 6,
+   "components": [
+    "+gm+"
+   ],
+   "gm_polarity": "+",
+   "path_class": "feedforward",
+   "connectivity": "single"
+  },
+  {
+   "raw_code": 7,
+   "components": [
+    "-gm+"
+   ],
+   "gm_polarity": "-",
+   "path_class": "feedforward",
+   "connectivity": "single"
+  },
+  {
+   "raw_code": 8,
+   "components": [
+    "+gm-"
+   ],
+   "gm_polarity": "+",
+   "path_class": "feedback",
+   "connectivity": "single"
+  },
+  {
+   "raw_code": 9,
+   "components": [
+    "-gm-"
+   ],
+   "gm_polarity": "-",
+   "path_class": "feedback",
+   "connectivity": "single"
+  },
+  {
+   "raw_code": 10,
+   "components": [
+    "C",
+    "+gm+"
+   ],
+   "gm_polarity": "+",
+   "path_class": "feedforward",
+   "connectivity": "parallel"
+  },
+  {
+   "raw_code": 11,
+   "components": [
+    "C",
+    "-gm+"
+   ],
+   "gm_polarity": "-",
+   "path_class": "feedforward",
+   "connectivity": "parallel"
+  },
+  {
+   "raw_code": 12,
+   "components": [
+    "C",
+    "+gm-"
+   ],
+   "gm_polarity": "+",
+   "path_class": "feedback",
+   "connectivity": "parallel"
+  },
+  {
+   "raw_code": 13,
+   "components": [
+    "C",
+    "-gm-"
+   ],
+   "gm_polarity": "-",
+   "path_class": "feedback",
+   "connectivity": "parallel"
+  },
+  {
+   "raw_code": 14,
+   "components": [
+    "R",
+    "+gm+"
+   ],
+   "gm_polarity": "+",
+   "path_class": "feedforward",
+   "connectivity": "parallel"
+  },
+  {
+   "raw_code": 15,
+   "components": [
+    "R",
+    "-gm+"
+   ],
+   "gm_polarity": "-",
+   "path_class": "feedforward",
+   "connectivity": "parallel"
+  },
+  {
+   "raw_code": 16,
+   "components": [
+    "R",
+    "+gm-"
+   ],
+   "gm_polarity": "+",
+   "path_class": "feedback",
+   "connectivity": "parallel"
+  },
+  {
+   "raw_code": 17,
+   "components": [
+    "R",
+    "-gm-"
+   ],
+   "gm_polarity": "-",
+   "path_class": "feedback",
+   "connectivity": "parallel"
+  },
+  {
+   "raw_code": 18,
+   "components": [
+    "C",
+    "R",
+    "+gm+"
+   ],
+   "gm_polarity": "+",
+   "path_class": "feedforward",
+   "connectivity": "parallel"
+  },
+  {
+   "raw_code": 19,
+   "components": [
+    "C",
+    "R",
+    "-gm+"
+   ],
+   "gm_polarity": "-",
+   "path_class": "feedforward",
+   "connectivity": "parallel"
+  },
+  {
+   "raw_code": 20,
+   "components": [
+    "C",
+    "R",
+    "+gm-"
+   ],
+   "gm_polarity": "+",
+   "path_class": "feedback",
+   "connectivity": "parallel"
+  },
+  {
+   "raw_code": 21,
+   "components": [
+    "C",
+    "R",
+    "-gm-"
+   ],
+   "gm_polarity": "-",
+   "path_class": "feedback",
+   "connectivity": "parallel"
+  },
+  {
+   "raw_code": 22,
+   "components": [
+    "C",
+    "R",
+    "+gm+"
+   ],
+   "gm_polarity": "+",
+   "path_class": "feedforward",
+   "connectivity": "series"
+  },
+  {
+   "raw_code": 23,
+   "components": [
+    "C",
+    "R",
+    "-gm+"
+   ],
+   "gm_polarity": "-",
+   "path_class": "feedforward",
+   "connectivity": "series"
+  },
+  {
+   "raw_code": 24,
+   "components": [
+    "C",
+    "R",
+    "+gm-"
+   ],
+   "gm_polarity": "+",
+   "path_class": "feedback",
+   "connectivity": "series"
+  },
+  {
+   "raw_code": 25,
+   "components": [
+    "C",
+    "R",
+    "-gm-"
+   ],
+   "gm_polarity": "-",
+   "path_class": "feedback",
+   "connectivity": "series"
+  }
+ ],
+ "gm_notation": "first sign = transconductance polarity; second sign = '+' feedforward main path / '-' feedback (OCB paper + amp_generator.py)",
+ "indexing": "zero-based subgraph ids; vertex 'type' field = SUBG_NODE id",
+ "limitations": [
+  "series/parallel split for codes 18-25 taken from generation comments; both variants share components"
+ ]
+}

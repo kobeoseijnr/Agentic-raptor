@@ -1,0 +1,5 @@
+schema_version: 3e2.1
+split: test
+families: 16
+rag_retrieval: disabled
+policy: phase_d_seed0_deterministic

@@ -1,0 +1,11 @@
+# Normalise line endings so a Windows checkout and a Linux CI agree.
+* text=auto eol=lf
+
+# SPICE decks and PDK-adjacent files are read by ngspice verbatim
+*.cir  text eol=lf
+*.sp   text eol=lf
+*.spice text eol=lf
+
+*.png binary
+*.pt  binary
+*.safetensors binary

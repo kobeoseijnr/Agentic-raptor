@@ -1,0 +1,33 @@
+# Topology-RL-focused overrides (used when experimenting on the topology level alone).
+seed: 42
+device: cpu
+output_dir: outputs/topology_rl
+
+mcts:
+  num_simulations: 64
+  c_puct: 1.5
+  max_depth: 5
+  pw_c: 2.5
+  pw_alpha: 0.5
+  pw_min: 4
+
+policy_value:
+  hidden_dim: 128
+  encoder: message_passing
+  lr: 0.0005
+  value_loss_weight: 1.0
+  batch_size: 32
+  updates_per_episode: 4
+
+actions:
+  max_edits: 10
+  max_actions: 32
+  invalid_action_penalty: -0.5
+
+budgets:
+  max_topology_edits: 10
+  max_sizing_steps: 8
+  max_spice_calls: 12
+  max_runtime_s: 600.0
+  max_generations: 4
+  max_retrievals: 5

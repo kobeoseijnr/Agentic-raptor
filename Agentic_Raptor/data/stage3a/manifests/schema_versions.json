@@ -1,0 +1,28 @@
+{
+ "schema_version": "3a.0.1",
+ "field_provenance": {
+  "OBSERVED": [
+   "llm_raw_output",
+   "validation_result",
+   "spice metrics/log paths",
+   "pvt results",
+   "stdout"
+  ],
+  "DERIVED": [
+   "*_hash",
+   "*_id",
+   "margins",
+   "reward*",
+   "split",
+   "group_key",
+   "tier",
+   "preference labels"
+  ],
+  "PREDICTED": [
+   "dpo_score",
+   "predicted_*",
+   "uncertainty",
+   "dynamics outputs"
+  ]
+ }
+}

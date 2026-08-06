@@ -1,0 +1,10 @@
+schema_version: 3e2.1
+seeds: [0, 1, 2]
+families: 16
+steps_per_family: 2
+actor: mlp_20_32_2_squashed_gaussian
+critics: twin_mlp_21_32_1
+encoder: shared_mp_2round_16d_in_graph
+lr: 0.0003
+alpha: auto
+batch: 4

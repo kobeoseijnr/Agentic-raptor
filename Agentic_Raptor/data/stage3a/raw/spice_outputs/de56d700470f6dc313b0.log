@@ -1,0 +1,28 @@
+$ C:\Users\kobeo\OneDrive\Desktop\Spice64\bin\ngspice_con.EXE -b C:\Users\kobeo\AppData\Local\Temp\agentic_raptor_spice\cand-34f7fd3e8858_typical_op_ac_0004\circuit.cir
+--- stdout ---
+
+Note: No compatibility mode selected!
+
+
+Circuit: * agentic raptor netlist  candidate=cand-34f7fd3e8858
+
+Doing analysis at TEMP = 27.000000 and TNOM = 27.000000
+
+Using SPARSE 1.3 as Direct Linear Solver
+
+No. of Data Rows : 1
+v(n_out) = 9.008582e-01
+vvdd#branch = -4.44134e-05
+Doing analysis at TEMP = 27.000000 and TNOM = 27.000000
+
+Using SPARSE 1.3 as Direct Linear Solver
+
+No. of Data Rows : 243
+dc_gain_db          =  5.158634e+01
+ugf_hz              =  7.120802e+07
+phase_at_ugf        =  -9.964714e+01
+ngspice-45.2 done
+
+--- stderr ---
+
+--- returncode: 0 timed_out: False runtime_s: 0.077 ---

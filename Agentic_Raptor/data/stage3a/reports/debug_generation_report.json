@@ -1,0 +1,25 @@
+{
+ "verdict": "DEBUG_DATASET_VALID",
+ "runs": 5,
+ "counts": {
+  "sft/train": 4,
+  "sft/validation": 0,
+  "sft/test": 0,
+  "search_ranker/train": 7,
+  "search_ranker/validation": 0,
+  "search_ranker/test": 0,
+  "topology_rl/train": 4,
+  "topology_rl/validation": 0,
+  "topology_rl/test": 0,
+  "mb_sac/train": 4,
+  "mb_sac/validation": 0,
+  "mb_sac/test": 0
+ },
+ "reached_spice": 4,
+ "quarantined": 0,
+ "leakage": 0,
+ "duplicate_fraction": 0.0,
+ "splits_of_groups": {
+  "spec-2e0c25e": "train"
+ }
+}

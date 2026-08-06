@@ -1,0 +1,12 @@
+# Runtime
+numpy
+networkx>=3.0
+pyyaml
+torch
+
+# Development
+pytest
+ruff
+
+# Optional (graph encoder upgrade; fallback pooled/message-passing encoders work without it)
+# torch-geometric

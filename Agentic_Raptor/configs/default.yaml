@@ -1,0 +1,106 @@
+# Agentic RAPTOR — default configuration
+seed: 42
+device: cpu
+output_dir: outputs
+
+logging:
+  level: INFO
+  decision_log: outputs/decisions.jsonl
+
+specification:
+  # Multimodal inputs (any subset; at least one). Paths resolve relative to this file.
+  text: |
+    Design a low-power two-stage OTA in 180nm with supply 1.8 V.
+    Gain >= 70 dB, GBW >= 50 MHz, phase margin >= 60 deg,
+    power budget 1 mW, load capacitance 1 pF.
+  structured_specification_path: null
+  table_path: null
+  schematic_image_path: null
+  netlist_path: null
+  defaults:
+    temperature_c: 27.0
+
+graph_limits:
+  max_nodes: 200
+  max_edges: 800
+
+actions:
+  max_edits: 8
+  max_actions: 32
+  invalid_action_penalty: -0.5
+
+mcts:
+  num_simulations: 32
+  c_puct: 1.5
+  max_depth: 4
+  pw_c: 2.0
+  pw_alpha: 0.5
+  pw_min: 3
+
+policy_value:
+  hidden_dim: 128
+  encoder: pooled            # pooled | message_passing (PyG unavailable; see DECISIONS.md)
+  lr: 0.001
+  value_loss_weight: 1.0
+  batch_size: 16
+  updates_per_episode: 2
+
+sac:
+  hidden_dim: 128
+  gamma: 0.99
+  tau: 0.005
+  lr: 0.0003
+  init_alpha: 0.2
+  auto_alpha: true
+  real_batch_fraction: 0.8
+  rollout_horizon: 3
+  batch_size: 16
+  updates_per_episode: 2
+  dynamics_updates_per_episode: 2
+  sizing_steps: 6
+
+spice:
+  simulator: mock            # mock | legacy_ngspice (stage 2)
+  ngspice_exe: null          # set locally; never commit machine paths
+  analyses: [op, ac]
+  timeout_s: 10.0
+  cache_path: outputs/spice_cache.jsonl
+  pvt_corners: 3
+
+budgets:
+  max_topology_edits: 8
+  max_sizing_steps: 12
+  max_spice_calls: 16
+  max_runtime_s: 300.0
+  max_generations: 3
+  max_retrievals: 5
+
+reward_weights:
+  feasibility_weight: 1.0
+  fom_weight: 0.5
+  pvt_weight: 0.3
+  spice_cost_weight: 0.1
+  runtime_weight: 0.05
+  invalidity_weight: 0.5
+  validity_weight: 0.2
+  sizing_progress_weight: 0.2
+  fom_scale: 200.0
+  credit_gamma: 0.97
+  shaping_blend: 0.0
+
+rag:
+  persist_path: outputs/memory.jsonl
+  top_k: 3
+  include_failures: true
+  seed_corpus: true
+
+llm:
+  generator: mock            # mock | llm (provider via AGENTIC_RAPTOR_LLM_* env vars)
+  number_of_candidates: 2
+  max_retries: 2
+
+coordinator:
+  accept_reward_threshold: 0.5
+  stagnation_patience: 3
+  max_repeated_failures: 3
+  max_decisions: 40

@@ -1,0 +1,34 @@
+# Stage 3A DEBUG dataset config — five-transistor OTA only.
+# Proves data generation + traceability; NOT training-scale data.
+stage3a:
+  dataset_version: "3a.0.1-debug"
+  execution_mode: REAL            # REAL | MOCK | SYNTHETIC_TEST (mock runs quarantined from real datasets)
+  debug_topology_family: five_transistor_ota
+  topology_families: [five_transistor_ota]
+  unsupported_families:           # documented, never fabricated (see audit §4.10)
+    - telescopic_cascode_ota
+    - folded_cascode_ota
+    - two_stage_miller_opamp
+  heldout_topology_family: null   # debug mode: no family holdout possible with one family
+  # Correction 3: >=5 spec groups so grouped train/val/test all populate;
+  # empty debug splits additionally permitted (split algorithm has fixture tests).
+  runs: 5
+  seeds: [101, 102, 103, 104, 105]
+  allow_empty_debug_splits: true
+  # Correction 4: model comes from the Stage 2 verified provider config /
+  # env vars (llm section of stage2_end_to_end.yaml); not re-hard-coded here.
+  llm_config_source: ../experiments/stage2_end_to_end.yaml
+  spice: {simulator: ngspice, pvt_corners: 2}
+  budgets: {max_spice_calls: 20, max_sizing_steps: 6, max_topology_edits: 3}
+  raw_root: data/stage3a/raw
+  processed_root: data/stage3a/processed
+  splits: {train: 0.7, validation: 0.15, test: 0.15, group_by: [specification_hash, topology_family]}
+  quality_thresholds:
+    minimum_real_spice_records: 1
+    minimum_unique_specifications: 1
+    minimum_unique_graphs: 1
+    maximum_duplicate_fraction: 0.20
+    require_zero_split_leakage: true
+    require_zero_mock_records_in_real_datasets: true
+    require_zero_imagined_records_in_real_mb_sac: true
+  validator_verdicts: [DEBUG_DATASET_VALID]   # this config can never claim FULL_DATASET_VALID

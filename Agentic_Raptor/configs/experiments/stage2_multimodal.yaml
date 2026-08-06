@@ -1,0 +1,65 @@
+# Stage 2 — real multimodal provider path (Smoke B).
+# Requires the credential env var named below (default OPENAI_API_KEY).
+# Mock SPICE so this config isolates the provider integration.
+seed: 13
+device: cpu
+output_dir: ../../outputs/stage2_multimodal
+
+logging:
+  level: INFO
+  decision_log: ../../outputs/stage2_multimodal/decisions.jsonl
+
+specification:
+  text: |
+    Design a low-power OTA in a generic process, supply 1.8 V.
+    Gain >= 45 dB, GBW >= 5 MHz, phase margin >= 55 deg, power <= 1 mW,
+    load capacitance 1 pF.
+  schematic_image_path: null     # set to a schematic PNG to exercise image input
+  defaults:
+    temperature_c: 27.0
+    technology: generic
+    circuit_class: ota
+
+llm:
+  generator: llm
+  real_llm_enabled: true
+  provider: openai_compatible
+  model_name: gpt-4o-mini
+  api_key_env: OPENAI_API_KEY
+  base_url_env: AGENTIC_RAPTOR_LLM_BASE_URL
+  provider_timeout_s: 90.0
+  provider_retries: 1
+  image_parsing_enabled: true
+  number_of_candidates: 1
+  max_retries: 2
+
+spice:
+  simulator: mock
+  analyses: [op, ac]
+  pvt_corners: 2
+
+budgets:
+  max_topology_edits: 3
+  max_sizing_steps: 4
+  max_spice_calls: 8
+  max_runtime_s: 400.0
+  max_generations: 2
+  max_retrievals: 3
+
+policy_value:
+  hidden_dim: 32
+  batch_size: 8
+
+sac:
+  hidden_dim: 32
+  batch_size: 8
+  sizing_steps: 3
+
+rag:
+  persist_path: null
+  top_k: 3
+  seed_corpus: true
+  include_failures: true
+
+coordinator:
+  max_decisions: 25

@@ -1,0 +1,6 @@
+{
+ "prohibited_leakage": 0,
+ "checks": [
+  "group overlap across splits: NONE"
+ ]
+}

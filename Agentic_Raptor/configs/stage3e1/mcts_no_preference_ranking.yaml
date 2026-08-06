@@ -1,0 +1,18 @@
+schema_version: 3e1.1
+num_simulations: 4
+c_puct: 1.5
+max_depth: 2
+max_children: 4
+max_expansions: 16
+max_real_spice_calls: 6
+leaf_mode: value_only
+spice_visit_threshold: 2
+leaf_spice_budget: 3
+root_dirichlet_alpha: 0.4
+root_noise_eps: 0.25
+training_mode: true
+use_policy_prior: true
+use_value_net: true
+use_mbsac_leaf: true
+seed: 0
+note: ranking bypass handled in leaf evaluator config

@@ -1,0 +1,3 @@
+schema_version: 3e2.1
+status: configs_only_campaign_deferred_compute
+modes: ['model_free', 'topology_specific', 'pooled', 'no_rollout', 'single_model', 'no_rag', 'no_ranking', 'no_surrogate', 'random_sizing']

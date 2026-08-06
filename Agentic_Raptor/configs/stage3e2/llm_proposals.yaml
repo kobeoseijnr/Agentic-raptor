@@ -1,0 +1,4 @@
+schema_version: 3e2.1
+provider: fixture
+supported_blocks: 5
+external_adapter: slot_documented_not_required

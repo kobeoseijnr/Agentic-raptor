@@ -1,0 +1,15 @@
+# RAG-focused overrides (memory persistence + retrieval sweeps).
+seed: 42
+device: cpu
+output_dir: outputs/rag
+
+rag:
+  persist_path: outputs/rag/memory.jsonl
+  top_k: 5
+  include_failures: true
+  seed_corpus: true
+
+llm:
+  generator: mock
+  number_of_candidates: 4
+  max_retries: 2

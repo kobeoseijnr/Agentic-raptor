@@ -1,0 +1,8 @@
+schema_version: 3e2.1
+seeds: [0, 1, 2]
+episodes_per_seed: 1
+simulations: 6
+spice_per_episode: 4
+c_puct: 1.5
+root: topology_v2_0001
+mixed_actions: ['SELECT', 'KEEP', 'TERMINATE', 'ADD_COMP', 'ADD_STAGE']

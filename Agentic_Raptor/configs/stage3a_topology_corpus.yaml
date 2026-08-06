@@ -1,0 +1,26 @@
+# Stage 3A topology-corpus configuration (no topology count encoded anywhere).
+topology_library:
+  root: datasets/topology_library
+  discover_dynamically: true
+  require_graph: true
+  require_metadata: true
+  require_blocks: true
+  require_netlist: false
+  require_schematic: false
+
+retrieval:
+  index_root: datasets/topology_rag
+  top_k_families: 5
+  top_k_blocks: 10
+  include_unvalidated_structural_candidates: true
+  prefer_electrically_validated: true
+  simulation_memory_level: reserved_empty   # populated only from real SPICE-labelled runs
+
+splits:
+  manifest: datasets/topology_splits/family_split.json
+  benchmark_manifest: datasets/topology_splits/benchmark_holdout_split.json
+  seed: 42
+
+legacy:
+  enable_five_topology_mode: false   # historical note: the "five" were spec VARIANTS
+                                     # over one 5T-OTA template, not five topologies

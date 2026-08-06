@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-raptor"
+version = "0.1.0"
+description = "Agentic RAPTOR: multimodal specification parsing, RAG-conditioned topology generation, AlphaZero-inspired topology RL, graph-conditioned MB-SAC sizing, and SPICE-based cross-level credit assignment."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "networkx>=3.0",
+    "pyyaml",
+    "torch",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+graph = ["torch-geometric"]  # optional; fallback encoders used when absent
+
+[tool.setuptools.packages.find]
+include = ["agentic_raptor*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501", "UP042"]  # UP042: keep explicit (str, Enum) bases for serialization clarity
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: fast deterministic tests (default)",
+    "integration: cross-module tests using mocks",
+    "requires_ngspice: needs a local ngspice installation (auto-skipped when absent)",
+    "requires_multimodal_api: needs provider credentials AND AGENTIC_RAPTOR_RUN_API_TESTS=1 (never runs by default)",
+]

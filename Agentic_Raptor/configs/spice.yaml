@@ -1,0 +1,21 @@
+# SPICE-focused overrides. The legacy_ngspice simulator is a stage-2 integration;
+# set ngspice_exe locally (never commit machine-specific paths).
+seed: 42
+device: cpu
+output_dir: outputs/spice
+
+spice:
+  simulator: mock            # switch to legacy_ngspice once stage-2 wiring lands
+  ngspice_exe: null
+  analyses: [op, ac, tran]
+  timeout_s: 60.0
+  cache_path: outputs/spice/cache.jsonl
+  pvt_corners: 5
+
+budgets:
+  max_topology_edits: 4
+  max_sizing_steps: 8
+  max_spice_calls: 40
+  max_runtime_s: 1800.0
+  max_generations: 2
+  max_retrievals: 3

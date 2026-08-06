@@ -1,0 +1,867 @@
+{
+  "episode_id": "ep-30ff872be5",
+  "success": true,
+  "final_state": "TERMINATE",
+  "final_reward": 1.9675612762040393,
+  "best_candidate": {
+    "candidate_id": "cand-34f7fd3e8858",
+    "parent_candidate_id": null,
+    "topology": {
+      "graph_id": "ota-design-001",
+      "metadata": {
+        "name": "",
+        "description": "",
+        "circuit_family": "",
+        "source": "",
+        "tags": [],
+        "extra": {
+          "reasoning_summary": "This topology includes a differential pair of NMOS transistors, a current mirror load with PMOS transistors, and a biasing current source. The design ensures all terminals are connected, providing a stable DC path and meeting the specifications for gain, bandwidth, and phase margin.",
+          "confidence": 0.95,
+          "memories_used": [
+            "mem-dbadb8f73b04",
+            "mem-520cbd9c922e",
+            "mem-43ed2a8e810f"
+          ],
+          "generator": "llm",
+          "generation_attempt": 2
+        }
+      },
+      "nodes": [
+        {
+          "node_id": "cc1",
+          "device_type": "CAPACITOR",
+          "terminals": [
+            "P",
+            "N"
+          ],
+          "attributes": {},
+          "sizing_parameters": {
+            "capacitance_f": 3.162277660168379e-13
+          },
+          "block_role": "compensation"
+        },
+        {
+          "node_id": "cl",
+          "device_type": "CAPACITOR",
+          "terminals": [
+            "P",
+            "N"
+          ],
+          "attributes": {},
+          "sizing_parameters": {
+            "capacitance_f": 3.162277660168379e-13
+          },
+          "block_role": "load"
+        },
+        {
+          "node_id": "gnd",
+          "device_type": "GROUND_PORT",
+          "terminals": [
+            "PORT"
+          ],
+          "attributes": {},
+          "sizing_parameters": {},
+          "block_role": null
+        },
+        {
+          "node_id": "ib1",
+          "device_type": "CURRENT_SOURCE",
+          "terminals": [
+            "P",
+            "N"
+          ],
+          "attributes": {},
+          "sizing_parameters": {
+            "current_a": 2.2360679774997894e-05
+          },
+          "block_role": "bias_branch"
+        },
+        {
+          "node_id": "inn",
+          "device_type": "INPUT_PORT",
+          "terminals": [
+            "PORT"
+          ],
+          "attributes": {},
+          "sizing_parameters": {},
+          "block_role": null
+        },
+        {
+          "node_id": "inp",
+          "device_type": "INPUT_PORT",
+          "terminals": [
+            "PORT"
+          ],
+          "attributes": {},
+          "sizing_parameters": {},
+          "block_role": null
+        },
+        {
+          "node_id": "m1",
+          "device_type": "NMOS",
+          "terminals": [
+            "D",
+            "G",
+            "S",
+            "B"
+          ],
+          "attributes": {},
+          "sizing_parameters": {
+            "width_m": 4.47213595499958e-06,
+            "length_m": 5e-07,
+            "multiplier": 8.5
+          },
+          "block_role": "diff_pair"
+        },
+        {
+          "node_id": "m2",
+          "device_type": "NMOS",
+          "terminals": [
+            "D",
+            "G",
+            "S",
+            "B"
+          ],
+          "attributes": {},
+          "sizing_parameters": {
+            "width_m": 4.47213595499958e-06,
+            "length_m": 5e-07,
+            "multiplier": 8.5
+          },
+          "block_role": "diff_pair"
+        },
+        {
+          "node_id": "m3",
+          "device_type": "PMOS",
+          "terminals": [
+            "D",
+            "G",
+            "S",
+            "B"
+          ],
+          "attributes": {},
+          "sizing_parameters": {
+            "width_m": 6.324555320336759e-06,
+            "length_m": 5e-07,
+            "multiplier": 8.5
+          },
+          "block_role": "mirror_load"
+        },
+        {
+          "node_id": "m4",
+          "device_type": "PMOS",
+          "terminals": [
+            "D",
+            "G",
+            "S",
+            "B"
+          ],
+          "attributes": {},
+          "sizing_parameters": {
+            "width_m": 6.324555320336759e-06,
+            "length_m": 5e-07,
+            "multiplier": 8.5
+          },
+          "block_role": "mirror_load"
+        },
+        {
+          "node_id": "m5",
+          "device_type": "NMOS",
+          "terminals": [
+            "D",
+            "G",
+            "S",
+            "B"
+          ],
+          "attributes": {},
+          "sizing_parameters": {
+            "width_m": 4.47213595499958e-06,
+            "length_m": 5e-07,
+            "multiplier": 8.5
+          },
+          "block_role": "tail_source"
+        },
+        {
+          "node_id": "m6",
+          "device_type": "NMOS",
+          "terminals": [
+            "D",
+            "G",
+            "S",
+            "B"
+          ],
+          "attributes": {},
+          "sizing_parameters": {
+            "width_m": 4.47213595499958e-06,
+            "length_m": 5e-07,
+            "multiplier": 8.5
+          },
+          "block_role": "bias_branch"
+        },
+        {
+          "node_id": "out",
+          "device_type": "OUTPUT_PORT",
+          "terminals": [
+            "PORT"
+          ],
+          "attributes": {},
+          "sizing_parameters": {},
+          "block_role": null
+        },
+        {
+          "node_id": "vdd",
+          "device_type": "SUPPLY_PORT",
+          "terminals": [
+            "PORT"
+          ],
+          "attributes": {},
+          "sizing_parameters": {},
+          "block_role": null
+        }
+      ],
+      "edges": [
+        {
+          "edge_id": "e1",
+          "node_id": "cc1",
+          "terminal": "P",
+          "net": "n_mirror"
+        },
+        {
+          "edge_id": "e2",
+          "node_id": "cc1",
+          "terminal": "N",
+          "net": "n_out"
+        },
+        {
+          "edge_id": "e_cln",
+          "node_id": "cl",
+          "terminal": "N",
+          "net": "n_gnd"
+        },
+        {
+          "edge_id": "e_clp",
+          "node_id": "cl",
+          "terminal": "P",
+          "net": "n_out"
+        },
+        {
+          "edge_id": "e_gnd",
+          "node_id": "gnd",
+          "terminal": "PORT",
+          "net": "n_gnd"
+        },
+        {
+          "edge_id": "e_ib1n",
+          "node_id": "ib1",
+          "terminal": "N",
+          "net": "n_bias"
+        },
+        {
+          "edge_id": "e_ib1p",
+          "node_id": "ib1",
+          "terminal": "P",
+          "net": "n_vdd"
+        },
+        {
+          "edge_id": "e_inn",
+          "node_id": "inn",
+          "terminal": "PORT",
+          "net": "n_inn"
+        },
+        {
+          "edge_id": "e_inp",
+          "node_id": "inp",
+          "terminal": "PORT",
+          "net": "n_inp"
+        },
+        {
+          "edge_id": "e_m1b",
+          "node_id": "m1",
+          "terminal": "B",
+          "net": "n_gnd"
+        },
+        {
+          "edge_id": "e_m1d",
+          "node_id": "m1",
+          "terminal": "D",
+          "net": "n_mirror"
+        },
+        {
+          "edge_id": "e_m1g",
+          "node_id": "m1",
+          "terminal": "G",
+          "net": "n_inp"
+        },
+        {
+          "edge_id": "e_m1s",
+          "node_id": "m1",
+          "terminal": "S",
+          "net": "n_tail"
+        },
+        {
+          "edge_id": "e_m2b",
+          "node_id": "m2",
+          "terminal": "B",
+          "net": "n_gnd"
+        },
+        {
+          "edge_id": "e_m2d",
+          "node_id": "m2",
+          "terminal": "D",
+          "net": "n_out"
+        },
+        {
+          "edge_id": "e_m2g",
+          "node_id": "m2",
+          "terminal": "G",
+          "net": "n_inn"
+        },
+        {
+          "edge_id": "e_m2s",
+          "node_id": "m2",
+          "terminal": "S",
+          "net": "n_tail"
+        },
+        {
+          "edge_id": "e_m3b",
+          "node_id": "m3",
+          "terminal": "B",
+          "net": "n_vdd"
+        },
+        {
+          "edge_id": "e_m3d",
+          "node_id": "m3",
+          "terminal": "D",
+          "net": "n_mirror"
+        },
+        {
+          "edge_id": "e_m3g",
+          "node_id": "m3",
+          "terminal": "G",
+          "net": "n_mirror"
+        },
+        {
+          "edge_id": "e_m3s",
+          "node_id": "m3",
+          "terminal": "S",
+          "net": "n_vdd"
+        },
+        {
+          "edge_id": "e_m4b",
+          "node_id": "m4",
+          "terminal": "B",
+          "net": "n_vdd"
+        },
+        {
+          "edge_id": "e_m4d",
+          "node_id": "m4",
+          "terminal": "D",
+          "net": "n_out"
+        },
+        {
+          "edge_id": "e_m4g",
+          "node_id": "m4",
+          "terminal": "G",
+          "net": "n_mirror"
+        },
+        {
+          "edge_id": "e_m4s",
+          "node_id": "m4",
+          "terminal": "S",
+          "net": "n_vdd"
+        },
+        {
+          "edge_id": "e_m5b",
+          "node_id": "m5",
+          "terminal": "B",
+          "net": "n_gnd"
+        },
+        {
+          "edge_id": "e_m5d",
+          "node_id": "m5",
+          "terminal": "D",
+          "net": "n_tail"
+        },
+        {
+          "edge_id": "e_m5g",
+          "node_id": "m5",
+          "terminal": "G",
+          "net": "n_bias"
+        },
+        {
+          "edge_id": "e_m5s",
+          "node_id": "m5",
+          "terminal": "S",
+          "net": "n_gnd"
+        },
+        {
+          "edge_id": "e_m6b",
+          "node_id": "m6",
+          "terminal": "B",
+          "net": "n_gnd"
+        },
+        {
+          "edge_id": "e_m6d",
+          "node_id": "m6",
+          "terminal": "D",
+          "net": "n_bias"
+        },
+        {
+          "edge_id": "e_m6g",
+          "node_id": "m6",
+          "terminal": "G",
+          "net": "n_bias"
+        },
+        {
+          "edge_id": "e_m6s",
+          "node_id": "m6",
+          "terminal": "S",
+          "net": "n_gnd"
+        },
+        {
+          "edge_id": "e_out",
+          "node_id": "out",
+          "terminal": "PORT",
+          "net": "n_out"
+        },
+        {
+          "edge_id": "e_vdd",
+          "node_id": "vdd",
+          "terminal": "PORT",
+          "net": "n_vdd"
+        }
+      ]
+    },
+    "specifications": {
+      "circuit_class": "ota",
+      "technology": "generic",
+      "supply_voltage": 1.8,
+      "temperature_c": 27.0,
+      "target_gain_db": 45.0,
+      "target_gbw_hz": 5000000.0,
+      "minimum_phase_margin_deg": 55.0,
+      "maximum_power_w": 0.001,
+      "maximum_area_um2": null,
+      "minimum_slew_rate_v_per_s": null,
+      "minimum_output_swing_v": null,
+      "load_capacitance_f": 1e-12,
+      "common_mode_input_v": null,
+      "additional_constraints": {},
+      "source_metadata": {
+        "circuit_class": "structured",
+        "load_capacitance_f": "structured",
+        "maximum_power_w": "structured",
+        "minimum_phase_margin_deg": "structured",
+        "supply_voltage": "structured",
+        "target_gain_db": "structured",
+        "target_gbw_hz": "structured",
+        "technology": "structured",
+        "temperature_c": "default"
+      },
+      "NUMERIC_FIELDS": [
+        "supply_voltage",
+        "temperature_c",
+        "target_gain_db",
+        "target_gbw_hz",
+        "minimum_phase_margin_deg",
+        "maximum_power_w",
+        "maximum_area_um2",
+        "minimum_slew_rate_v_per_s",
+        "minimum_output_swing_v",
+        "load_capacitance_f",
+        "common_mode_input_v"
+      ]
+    },
+    "generation_source": "mock",
+    "edit_history": [
+      {
+        "action": {
+          "action_type": "ADD_COMPENSATION_CAPACITOR",
+          "params": {
+            "net_a": "n_mirror",
+            "net_b": "n_out"
+          }
+        },
+        "created_node_ids": [
+          "cc1"
+        ],
+        "removed_node_ids": []
+      }
+    ],
+    "sizing_state": {
+      "cc1": {
+        "capacitance_f": 3.162277660168379e-13
+      },
+      "cl": {
+        "capacitance_f": 3.162277660168379e-13
+      },
+      "ib1": {
+        "current_a": 2.2360679774997894e-05
+      },
+      "m1": {
+        "width_m": 4.47213595499958e-06,
+        "length_m": 5e-07,
+        "multiplier": 8.5
+      },
+      "m2": {
+        "width_m": 4.47213595499958e-06,
+        "length_m": 5e-07,
+        "multiplier": 8.5
+      },
+      "m3": {
+        "width_m": 6.324555320336759e-06,
+        "length_m": 5e-07,
+        "multiplier": 8.5
+      },
+      "m4": {
+        "width_m": 6.324555320336759e-06,
+        "length_m": 5e-07,
+        "multiplier": 8.5
+      },
+      "m5": {
+        "width_m": 4.47213595499958e-06,
+        "length_m": 5e-07,
+        "multiplier": 8.5
+      },
+      "m6": {
+        "width_m": 4.47213595499958e-06,
+        "length_m": 5e-07,
+        "multiplier": 8.5
+      }
+    },
+    "validation_result": {
+      "is_valid": true,
+      "issues": [],
+      "graph_hash": "71968da811527d0786da73f32494a404"
+    },
+    "simulation_result": {
+      "success": true,
+      "metrics": {
+        "gain_db": 51.58634,
+        "gbw_hz": 71208020.0,
+        "unity_gain_hz": 71208020.0,
+        "phase_margin_deg": 80.35286,
+        "power_w": 7.994412e-05,
+        "output_dc_v": 0.9008582
+      },
+      "constraint_margins": {
+        "gain_db": 0.1463631111111111,
+        "gbw_hz": 13.241604,
+        "phase_margin_deg": 0.46096109090909104,
+        "power_w": 0.9200558799999999
+      },
+      "raw_output_path": "C:\\Users\\kobeo\\AppData\\Local\\Temp\\agentic_raptor_spice\\cand-34f7fd3e8858_typical_op_ac_0004\\ngspice.log",
+      "runtime_s": 0.08259259999613278,
+      "error_type": null,
+      "error_message": null,
+      "corner": "typical",
+      "seed": 103
+    },
+    "reward": null,
+    "status": "accepted",
+    "metadata": {}
+  },
+  "metrics": {
+    "gain_db": 51.58634,
+    "gbw_hz": 71208020.0,
+    "unity_gain_hz": 71208020.0,
+    "phase_margin_deg": 80.35286,
+    "power_w": 7.994412e-05,
+    "output_dc_v": 0.9008582
+  },
+  "decisions": [
+    {
+      "episode_id": "ep-30ff872be5",
+      "state": "PARSE_SPECIFICATIONS",
+      "decision": "SPECIFICATIONS_PARSED",
+      "reason": "fused 15 fields from ['structured', 'text']; 0 conflicts; 0 plausibility warnings",
+      "budgets": {
+        "topology_edits_remaining": 3,
+        "sizing_steps_remaining": 6,
+        "spice_calls_remaining": 24,
+        "generations_remaining": 2,
+        "retrievals_remaining": 3,
+        "runtime_remaining_s": 899.9979369000066
+      },
+      "fusion": {
+        "fields_used": {
+          "circuit_class": "ota",
+          "load_capacitance_f": 1e-12,
+          "maximum_power_w": 0.001,
+          "minimum_phase_margin_deg": 55.0,
+          "supply_voltage": 1.8,
+          "target_gain_db": 45.0,
+          "target_gbw_hz": 5000000.0,
+          "technology": "generic",
+          "temperature_c": 27.0
+        },
+        "source_metadata": {
+          "circuit_class": "structured",
+          "load_capacitance_f": "structured",
+          "maximum_power_w": "structured",
+          "minimum_phase_margin_deg": "structured",
+          "supply_voltage": "structured",
+          "target_gain_db": "structured",
+          "target_gbw_hz": "structured",
+          "technology": "structured",
+          "temperature_c": "default"
+        },
+        "conflicts": [],
+        "missing_required": [],
+        "extracted_count": 15
+      },
+      "review": {
+        "is_plausible": true,
+        "checks": []
+      }
+    },
+    {
+      "episode_id": "ep-30ff872be5",
+      "state": "RETRIEVE",
+      "decision": "SEED_MEMORY",
+      "reason": "seeded 3 experience entries",
+      "budgets": {
+        "topology_edits_remaining": 3,
+        "sizing_steps_remaining": 6,
+        "spice_calls_remaining": 24,
+        "generations_remaining": 2,
+        "retrievals_remaining": 3,
+        "runtime_remaining_s": 899.9945006000053
+      }
+    },
+    {
+      "episode_id": "ep-30ff872be5",
+      "state": "RETRIEVE",
+      "decision": "RETRIEVE_MORE",
+      "reason": "retrieved 3 entries (2 successes, 1 failures)",
+      "budgets": {
+        "topology_edits_remaining": 3,
+        "sizing_steps_remaining": 6,
+        "spice_calls_remaining": 24,
+        "generations_remaining": 2,
+        "retrievals_remaining": 2,
+        "runtime_remaining_s": 899.9933103000076
+      },
+      "retrieval": {
+        "memory_ids": [
+          "mem-dbadb8f73b04",
+          "mem-520cbd9c922e",
+          "mem-43ed2a8e810f"
+        ],
+        "scores": {
+          "mem-dbadb8f73b04": 3.3,
+          "mem-520cbd9c922e": 3.2,
+          "mem-43ed2a8e810f": 1.494461684741533
+        }
+      }
+    },
+    {
+      "episode_id": "ep-30ff872be5",
+      "state": "GENERATE",
+      "decision": "GENERATE_NEW_TOPOLOGY",
+      "reason": "no candidate topology available",
+      "budgets": {
+        "topology_edits_remaining": 3,
+        "sizing_steps_remaining": 6,
+        "spice_calls_remaining": 24,
+        "generations_remaining": 2,
+        "retrievals_remaining": 2,
+        "runtime_remaining_s": 899.9922855000041
+      }
+    },
+    {
+      "episode_id": "ep-30ff872be5",
+      "state": "VALIDATE",
+      "decision": "REPAIR_OR_EDIT_TOPOLOGY",
+      "reason": "initial MCTS refinement pass before sizing (topology RL precedes MB-SAC)",
+      "budgets": {
+        "topology_edits_remaining": 3,
+        "sizing_steps_remaining": 6,
+        "spice_calls_remaining": 24,
+        "generations_remaining": 1,
+        "retrievals_remaining": 2,
+        "runtime_remaining_s": 871.5049111999979
+      }
+    },
+    {
+      "episode_id": "ep-30ff872be5",
+      "state": "VALIDATE",
+      "decision": "CONTINUE_SIZING",
+      "reason": "valid topology not yet sized",
+      "budgets": {
+        "topology_edits_remaining": 2,
+        "sizing_steps_remaining": 6,
+        "spice_calls_remaining": 24,
+        "generations_remaining": 1,
+        "retrievals_remaining": 2,
+        "runtime_remaining_s": 871.3844802000094
+      }
+    },
+    {
+      "episode_id": "ep-30ff872be5",
+      "state": "SIZE",
+      "decision": "RUN_SPICE",
+      "reason": "sizing proposed; evaluating with SPICE",
+      "budgets": {
+        "topology_edits_remaining": 2,
+        "sizing_steps_remaining": 2,
+        "spice_calls_remaining": 21,
+        "generations_remaining": 1,
+        "retrievals_remaining": 2,
+        "runtime_remaining_s": 871.1000481000083
+      }
+    },
+    {
+      "episode_id": "ep-30ff872be5",
+      "state": "SIMULATE",
+      "decision": "SPICE_RESULT",
+      "reason": "backend=ngspice success=True cached=False margins={'gain_db': 0.146, 'gbw_hz': 13.242, 'phase_margin_deg': 0.461, 'power_w': 0.92}",
+      "budgets": {
+        "topology_edits_remaining": 2,
+        "sizing_steps_remaining": 2,
+        "spice_calls_remaining": 20,
+        "generations_remaining": 1,
+        "retrievals_remaining": 2,
+        "runtime_remaining_s": 870.9730247000116
+      }
+    },
+    {
+      "episode_id": "ep-30ff872be5",
+      "state": "DIAGNOSE",
+      "decision": "RUN_PVT",
+      "reason": "nominal constraints met; verifying robustness across corners",
+      "budgets": {
+        "topology_edits_remaining": 2,
+        "sizing_steps_remaining": 2,
+        "spice_calls_remaining": 20,
+        "generations_remaining": 1,
+        "retrievals_remaining": 2,
+        "runtime_remaining_s": 870.9716971000016
+      }
+    },
+    {
+      "episode_id": "ep-30ff872be5",
+      "state": "SIMULATE",
+      "decision": "PVT_RESULT",
+      "reason": "pvt_score=1.00 over 2 corners; worst margins={'gain_db': 0.119, 'gbw_hz': 11.474, 'phase_margin_deg': 0.461, 'power_w': 0.92}",
+      "budgets": {
+        "topology_edits_remaining": 2,
+        "sizing_steps_remaining": 2,
+        "spice_calls_remaining": 18,
+        "generations_remaining": 1,
+        "retrievals_remaining": 2,
+        "runtime_remaining_s": 870.8331310000067
+      }
+    },
+    {
+      "episode_id": "ep-30ff872be5",
+      "state": "DIAGNOSE",
+      "decision": "ACCEPT_CANDIDATE",
+      "reason": "all constraints met at nominal and PVT evaluated",
+      "budgets": {
+        "topology_edits_remaining": 2,
+        "sizing_steps_remaining": 2,
+        "spice_calls_remaining": 18,
+        "generations_remaining": 1,
+        "retrievals_remaining": 2,
+        "runtime_remaining_s": 870.8319712000084
+      }
+    },
+    {
+      "episode_id": "ep-30ff872be5",
+      "state": "UPDATE_MEMORY",
+      "decision": "MEMORY_UPDATED",
+      "reason": "stored experience mem-e79f67682aba",
+      "budgets": {
+        "topology_edits_remaining": 2,
+        "sizing_steps_remaining": 2,
+        "spice_calls_remaining": 18,
+        "generations_remaining": 1,
+        "retrievals_remaining": 2,
+        "runtime_remaining_s": 870.7776262000116
+      }
+    }
+  ],
+  "update_report": {
+    "credit": {
+      "trajectory_id": "traj-ep-30ff872be5",
+      "steps_credited": 1,
+      "final_reward": 1.9675612762040393,
+      "returns": [
+        1.9675612762040393
+      ],
+      "reached_spice": true
+    },
+    "policy_value": {
+      "steps": [
+        {
+          "policy_loss": 2.81292724609375,
+          "value_loss": 0.8294713497161865,
+          "total_loss": 3.6423985958099365,
+          "batch_size": 1
+        },
+        {
+          "policy_loss": 2.8094592094421387,
+          "value_loss": 0.8137885332107544,
+          "total_loss": 3.6232476234436035,
+          "batch_size": 1
+        }
+      ]
+    },
+    "sac": {
+      "steps": [
+        {
+          "critic_loss": 14.07845687866211,
+          "actor_loss": -2.613912343978882,
+          "alpha": 0.19988000392913818,
+          "alpha_loss": -55.45679473876953,
+          "batch_real": 2.0,
+          "batch_model": 5.0
+        },
+        {
+          "critic_loss": 12.269615173339844,
+          "actor_loss": -2.6713061332702637,
+          "alpha": 0.19982002675533295,
+          "alpha_loss": -56.089656829833984,
+          "batch_real": 2.0,
+          "batch_model": 5.0
+        }
+      ]
+    },
+    "dynamics": {
+      "steps": [
+        {
+          "state_loss": 0.08448629453778267,
+          "reward_loss": 0.004838574677705765,
+          "done_loss": 0.6425995528697968,
+          "total_loss": 0.731924444437027,
+          "ensemble_size": 2.0
+        },
+        {
+          "state_loss": 0.0838322564959526,
+          "reward_loss": 0.00459173577837646,
+          "done_loss": 0.6369796395301819,
+          "total_loss": 0.7254036366939545,
+          "ensemble_size": 2.0
+        }
+      ]
+    },
+    "parameters_changed": {
+      "policy_value_network": true,
+      "dynamics_model": true,
+      "sac_actor": true,
+      "sac_critics": true
+    }
+  },
+  "budget_snapshot": {
+    "topology_edits_remaining": 2,
+    "sizing_steps_remaining": 2,
+    "spice_calls_remaining": 18,
+    "generations_remaining": 1,
+    "retrievals_remaining": 2,
+    "runtime_remaining_s": 870.7755278000113
+  },
+  "memory_id": "mem-e79f67682aba",
+  "summary_path": null,
+  "error": null
+}

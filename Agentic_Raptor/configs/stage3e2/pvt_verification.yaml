@@ -1,0 +1,6 @@
+schema_version: 3e2.1
+corners: ['tt', 'ss', 'ff']
+temps_c: [27, 85]
+supplies_v: [1.8, 1.62]
+reduced_points: 10
+design: topology_0002

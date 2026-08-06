@@ -1,0 +1,5 @@
+parameter,value,unit
+gain,70,dB
+gbw,55 MHz,
+slew_rate,20,V/us
+output_swing,1.2,V

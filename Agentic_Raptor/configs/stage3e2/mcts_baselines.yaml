@@ -1,0 +1,5 @@
+schema_version: 3e2.1
+seeds: [0, 1, 2]
+modes: ['full_az', 'no_policy_prior', 'random']
+spice_budget: 2
+simulations: 6

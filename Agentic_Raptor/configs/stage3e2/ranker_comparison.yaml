@@ -1,0 +1,4 @@
+schema_version: 3e2.1
+modes: ['bt_ranker', 'random', 'scalar_heuristic']
+budget_per_family: 2
+families: 2

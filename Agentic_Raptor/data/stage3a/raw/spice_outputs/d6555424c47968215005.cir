@@ -1,0 +1,41 @@
+* Agentic RAPTOR netlist  candidate=cand-60749c71adf5
+* topology_id=ota-design-001  topology_hash=9f5d10b29df8f8c8aee9f4efd313e30d
+* model_library=generic_1u_level1
+* Built-in generic LEVEL=1 models (technology-neutral; benchmark use only)
+.model nmos_generic NMOS (LEVEL=1 VTO=0.5 KP=120u LAMBDA=0.05 GAMMA=0.4 PHI=0.7 CGSO=0.2n CGDO=0.2n)
+.model pmos_generic PMOS (LEVEL=1 VTO=-0.5 KP=40u LAMBDA=0.06 GAMMA=0.5 PHI=0.7 CGSO=0.2n CGDO=0.2n)
+
+
+C_cc1 n_tail 0 6.3577e-13
+C_cl n_out 0 1.04709e-12
+I_ib1 n_vdd n_bias DC 3.09822e-05
+M_m1 n_mirror n_inp n_tail 0 nmos_generic W=9.25742e-06 L=7.48632e-07 M=7
+M_m2 n_out n_inn n_tail 0 nmos_generic W=3.41544e-06 L=3.27433e-07 M=9
+M_m3 n_mirror n_mirror n_vdd n_vdd pmos_generic W=3.78337e-05 L=7.88812e-07 M=7
+M_m4 n_out n_mirror n_vdd n_vdd pmos_generic W=7.58495e-06 L=4.9285e-07 M=7
+M_m5 n_tail n_bias 0 0 nmos_generic W=5.5223e-06 L=4.03502e-07 M=8
+M_m6 n_bias n_bias 0 0 nmos_generic W=4.50013e-06 L=5.03388e-07 M=9
+
+* --- testbench sources ---
+VVDD n_vdd 0 DC 1.8
+VCM cm_node 0 DC 0.9  ; default: vdd/2 (common_mode_input_v unspecified)
+.temp 27
+.options nomod
+.option reltol=1e-3 gmin=1e-12
+* input wiring: inverting input inferred from port id 'inn'
+VIN n_inp cm_node DC 0 AC 1
+LFB n_out n_inn 1e9
+CFB n_inn cm_node 1e9
+* internal load-role capacitor present; external CLOAD omitted
+
+.control
+set units=degrees
+op
+print v(n_out) vvdd#branch
+ac dec 25 1 5e+09
+meas ac dc_gain_db FIND vdb(n_out) AT=10
+meas ac ugf_hz WHEN vdb(n_out)=0 CROSS=1
+meas ac phase_at_ugf FIND vp(n_out) WHEN vdb(n_out)=0 CROSS=1
+quit 0
+.endc
+.end
