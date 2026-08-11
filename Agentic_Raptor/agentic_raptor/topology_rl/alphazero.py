@@ -182,32 +182,50 @@ def generate_alphazero_actions(state: TopologySearchState,
                                reg: LLMSeededEditRegistry,
                                pool_ids: list[str], max_alternatives: int = 4
                                ) -> tuple[list[Stage3E1Action], list[dict]]:
-    """generate_actions() with the FULL real edit catalog (AZ_EDIT_ACTION_
-    TYPES) offered at every state, not just the single hardcoded a_comp
-    action -- this is the entire fix: stage3e1.generate_actions() has
-    always been ABLE to gate on a richer edit set (validate_candidate
-    just checks `action.action_type.name in MAPPING_SUPPORTED_EDITS`),
-    nothing about the search engine itself needed to change."""
+    """Strict two-phase action space (Stage 5 Campaign 01B, Section 1 --
+    postmortem on CAMPAIGN_01_ATTEMPT_1):
+
+        SUPER_ROOT (state.topology_id == "proposal_root"):
+            legal: SELECT_EXISTING_TOPOLOGY(seed_0), SELECT_EXISTING_TOPOLOGY(
+            seed_1), ... -- exactly one seed commit, nothing else.
+        AFTER SEED SELECTION (any other state):
+            legal: real structural edits (AZ_EDIT_ACTION_TYPES), TERMINATE.
+            SELECT_EXISTING_TOPOLOGY is NEVER offered again.
+
+    The previous version offered a_sel_* at EVERY depth (gated only by
+    `alt != state.topology_id`, true at every non-root state too), which
+    let a real self-play trajectory repeatedly jump between complete LLM
+    seeds mid-search (SELECT(p03) -> SELECT(p00)) -- that behavior belongs
+    to the retired root-level selector (run_raptor_v2.puct_select_two),
+    not to sequential topology-edit search, and was the mechanical root
+    cause of CAMPAIGN_01_ATTEMPT_1's degenerate, spec-insensitive replay.
+    a_keep (KEEP_TOPOLOGY) is dropped entirely: it was a redundant no-op
+    ("stay uncommitted at the neutral root") that neither phase above
+    needs -- TERMINATE already covers "stop here" once committed, and the
+    super-root's only job now is to commit to a seed.
+    """
     ancestry = set(state.lineage)
-    cands: list[Stage3E1Action] = [
-        Stage3E1Action("a_keep", Stage3E1ActionType.KEEP_TOPOLOGY,
-                       source_ref=state.topology_id, provenance="self"),
-        Stage3E1Action("a_term", Stage3E1ActionType.TERMINATE_SEARCH,
-                       provenance="self"),
-    ]
-    for alt in sorted(pool_ids):
-        if alt != state.topology_id and len(cands) < 2 + max_alternatives:
+    at_super_root = state.topology_id == "proposal_root"
+
+    cands: list[Stage3E1Action] = []
+    if at_super_root:
+        alts = [a for a in sorted(pool_ids) if a != state.topology_id][:max_alternatives]
+        for alt in alts:
             cands.append(Stage3E1Action(
                 f"a_sel_{alt}", Stage3E1ActionType.SELECT_EXISTING_TOPOLOGY,
                 source_ref=alt, target_location="root",
                 preconditions=("target_in_registry",),
                 compatibility=("same_spec_class",), provenance="registry"))
-    for edit_type in sorted(AZ_EDIT_ACTION_TYPES, key=lambda t: t.value):
-        cands.append(Stage3E1Action(
-            f"a_edit_{edit_type.value}", edit_type,
-            source_ref=state.topology_id, target_location="graph",
-            preconditions=("edit_legal_for_current_graph",),
-            provenance="stage3e2_edits"))
+    else:
+        cands.append(Stage3E1Action("a_term", Stage3E1ActionType.TERMINATE_SEARCH,
+                                    provenance="self"))
+        for edit_type in sorted(AZ_EDIT_ACTION_TYPES, key=lambda t: t.value):
+            cands.append(Stage3E1Action(
+                f"a_edit_{edit_type.value}", edit_type,
+                source_ref=state.topology_id, target_location="graph",
+                preconditions=("edit_legal_for_current_graph",),
+                provenance="stage3e2_edits"))
+
     legal, rejections = [], []
     for a in cands:
         if a.action_type == Stage3E1ActionType.TERMINATE_SEARCH:
@@ -275,6 +293,17 @@ class AlphaZeroConfig:
     alphazero_temperature: float = 1.0     # visit-count exponent 1/tau at inference
     seed: int = 0
     training_mode: bool = False
+    #: Section 4 (Campaign 01B): root exploration noise, P_noisy(a) =
+    #: (1-eps)*P(a) + eps*eta(a), eta ~ Dirichlet(alpha) -- applied by the
+    #: REUSED stage3e1.TopologyMCTS._expand() machinery (it already had
+    #: this exact formula, gated on cfg.training_mode; only wiring these
+    #: two values through was missing). ONLY takes effect when
+    #: training_mode=True (episode collection); alphazero_select_two()'s
+    #: and validate_az_candidate()'s default AlphaZeroConfig() already has
+    #: training_mode=False, so FULL selection and paper inference are
+    #: unaffected without any extra guard.
+    dirichlet_epsilon: float = 0.25
+    dirichlet_alpha: float = 0.30
     leaf_mode: str = "value_only"          # "value_only" for Part-A-style diagnostics
 
 
@@ -318,7 +347,8 @@ def _search_cfg_from(cfg: AlphaZeroConfig):
         num_simulations=cfg.alphazero_simulations_per_move,
         c_puct=cfg.alphazero_c_puct, max_depth=cfg.alphazero_max_edit_depth,
         max_children=cfg.alphazero_max_children, leaf_mode=cfg.leaf_mode,
-        training_mode=cfg.training_mode, seed=cfg.seed)
+        training_mode=cfg.training_mode, root_noise_eps=cfg.dirichlet_epsilon,
+        root_dirichlet_alpha=cfg.dirichlet_alpha, seed=cfg.seed)
 
 
 def _search_from_state(root_state: TopologySearchState,
@@ -403,6 +433,24 @@ def run_alphazero_search(candidates: list[dict], spec: dict, ctx_id: str, *,
 # everything the PREVIOUS real transition changed, matching genuine
 # AlphaZero self-play.
 # ---------------------------------------------------------------------------
+def stable_episode_rng_seed(campaign_seed: int, generation_id: str,
+                            spec_hash: str, rollout_seed: int) -> int:
+    """Section 3 (Campaign 01B): a deterministic, process-stable per-
+    episode RNG seed. The previous code called `random.Random(seed)`
+    where `seed` was ONLY the rollout seed (e.g. 0) -- every episode in a
+    single-seed campaign run therefore replayed the IDENTICAL stochastic-
+    sampling sequence regardless of spec, which (combined with an
+    untrained G0's low-differentiation visit distributions) plausibly
+    contributed to CAMPAIGN_01_ATTEMPT_1's 8/8 identical trajectories.
+    Deliberately uses hashlib (NOT Python's built-in hash(), which is
+    salted per-process for strings unless PYTHONHASHSEED is fixed) so the
+    same four inputs always produce the same seed across processes/runs.
+    """
+    import hashlib
+    payload = f"{campaign_seed}|{generation_id}|{spec_hash}|{rollout_seed}".encode("utf-8")
+    return int(hashlib.sha256(payload).hexdigest()[:16], 16)
+
+
 def visit_policy(root_node, tau: float = 1.0) -> dict:
     """pi(a|s) proportional to N(s,a)^(1/tau), normalised over the root
     node's own legal children. tau<=1e-3 is treated as deterministic
@@ -423,26 +471,43 @@ def visit_policy(root_node, tau: float = 1.0) -> dict:
 def run_alphazero_episode(candidates: list[dict], spec: dict, ctx_id: str,
                           spec_hash: str, *, spec_index: int | None = None,
                           value_ckpt=None, seed: int = 0,
+                          campaign_seed: int = 0,
                           config: AlphaZeroConfig | None = None,
                           max_episode_depth: int = 4,
                           deterministic: bool = True,
-                          generation_id: str = "AZ_G0") -> dict:
+                          generation_id: str = "AZ_G0",
+                          nets: dict | None = None) -> dict:
     """One real self-play episode: S0 -> pi0 -> A0 -> S1 -> pi1 -> ... ->
     terminal. `deterministic=True` (max-visit action every step) is what
     Section 15's smoke episode and inference both use; `deterministic=
     False` samples proportional to pi (temperature =
-    config.alphazero_temperature) for future training-time exploration.
+    config.alphazero_temperature) for training-time exploration.
     Returns everything build_replay_rows()/terminal_evaluation() need --
     including the LIVE registry (`registry`), since the terminal
     topology's DeviceCircuitGraph lives only there.
+
+    The stochastic-sampling RNG is seeded via stable_episode_rng_seed()
+    (Section 3, Campaign 01B) from (campaign_seed, generation_id,
+    spec_hash, seed) rather than `seed` alone -- so two episodes that
+    differ in spec or rollout seed never silently replay the same
+    sampling sequence (see that function's docstring for why this
+    mattered in practice). `episode_rng_seed` is returned for replay
+    provenance/auditing.
+
+    `nets` may be passed in (default None -> load_alphazero_nets(
+    value_ckpt)) so a controlled/mocked policy can be substituted for
+    testing -- e.g. proving TERMINATE is reachable before max_episode_
+    depth (Section 2) by feeding a policy that overwhelmingly prefers it.
     """
     import random as _random
     from dataclasses import asdict
 
     cfg = config or AlphaZeroConfig(seed=seed)
     reg = LLMSeededEditRegistry(candidates)
-    nets = load_alphazero_nets(value_ckpt, seed=0)
-    rng = _random.Random(seed)
+    nets = nets or load_alphazero_nets(value_ckpt, seed=0)
+    episode_rng_seed = stable_episode_rng_seed(campaign_seed, generation_id,
+                                               spec_hash, seed)
+    rng = _random.Random(episode_rng_seed)
 
     state = build_root_state(spec, ctx_id, reg.seed_ids)
     steps = []
@@ -479,15 +544,28 @@ def run_alphazero_episode(candidates: list[dict], spec: dict, ctx_id: str,
 
     terminal_topology_id = (reg.seed_ids[0] if state.topology_id == "proposal_root"
                             else state.topology_id)
-    step_hashes = {s["state_graph_hash"] for s in steps}
+    terminal_topology_hash = reg.get_topology(terminal_topology_id).graph.structural_hash()
+    # `steps` only ever records each state BEFORE its own action was
+    # applied -- the truly terminal state (after the LAST action, or the
+    # state reached at max_episode_depth) is never itself a step's
+    # "state_graph_hash", so it must be added explicitly here or both
+    # novelty accounting and replay's terminal_topology_hash silently
+    # undercount/mis-point to the second-to-last state instead of the
+    # real terminal one.
+    step_hashes = {s["state_graph_hash"] for s in steps} | {terminal_topology_hash}
     seed_hashes = {reg.get_topology(sid).graph.structural_hash() for sid in reg.seed_ids}
     return {"ctx_id": ctx_id, "spec_hash": spec_hash, "spec_index": spec_index,
            "seed_ids": reg.seed_ids, "seed_topology_hashes": sorted(seed_hashes),
            "steps": steps, "terminal_topology_id": terminal_topology_id,
+           "terminal_topology_hash": terminal_topology_hash,
            "terminal_came_from_edit": terminal_topology_id not in reg.seed_ids,
            "seed_novel_hashes": sorted(step_hashes - seed_hashes),
            "seed_novel_count": len(step_hashes - seed_hashes),
-           "registry": reg, "generation_id": generation_id, "seed": seed}
+           "registry": reg, "generation_id": generation_id, "seed": seed,
+           "campaign_seed": campaign_seed, "episode_rng_seed": episode_rng_seed,
+           "deterministic": deterministic,
+           "dirichlet_epsilon": cfg.dirichlet_epsilon if cfg.training_mode else None,
+           "dirichlet_alpha": cfg.dirichlet_alpha if cfg.training_mode else None}
 
 
 def terminal_evaluation(episode: dict, spec: dict, *, budget: int = 16,
@@ -573,8 +651,7 @@ def build_replay_rows(episode: dict, terminal: dict, *,
     z = terminal.get("z")
     if z is None:
         return []
-    terminal_hash = (episode["steps"][-1]["state_graph_hash"]
-                     if episode["steps"] else None)
+    terminal_hash = episode["terminal_topology_hash"]
     rows = []
     for s in episode["steps"]:
         rows.append({
@@ -592,7 +669,11 @@ def build_replay_rows(episode: dict, terminal: dict, *,
             "simulated_c_load_f": terminal["simulated_c_load_f"],
             "electrical_environment_version": terminal["electrical_environment_version"],
             "policy_value_checkpoint_hash": checkpoint_hash,
-            "seed": episode["seed"], "split": "train"})
+            "seed": episode["seed"], "campaign_seed": episode.get("campaign_seed", 0),
+            "episode_rng_seed": episode.get("episode_rng_seed"),
+            "dirichlet_epsilon": episode.get("dirichlet_epsilon"),
+            "dirichlet_alpha": episode.get("dirichlet_alpha"),
+            "split": "train"})
     return rows
 
 
@@ -620,18 +701,28 @@ def write_replay_rows(rows: list, generation_id: str, out_root=None) -> "Path":
 def train_az_generation(replay_rows: list, reg: LLMSeededEditRegistry, *,
                         parent_checkpoint=None, lr: float = 1e-3,
                         weight_decay: float = 1e-4, epochs: int = 1,
-                        seed: int = 0) -> dict:
+                        seed: int = 0, nets: dict | None = None,
+                        opt=None) -> dict:
+    """`nets`/`opt` may be passed in (and are then also returned) so a
+    caller collecting replay from MULTIPLE episodes -- each with its OWN
+    LLMSeededEditRegistry, whose topology_ids (e.g. "p00") are only
+    locally unique within that one episode and WOULD collide if merged
+    into a single registry -- can call this once per episode's own
+    (rows, registry) pair while accumulating gradients on the SAME
+    network across the whole batch, instead of building one fresh network
+    per episode (which would silently discard everything learned from
+    every earlier episode)."""
     from agentic_raptor.topology_rl import stage3e1 as s1
-    nets = load_alphazero_nets(parent_checkpoint, seed=0)
+    import torch
+    nets = nets or load_alphazero_nets(parent_checkpoint, seed=0)
+    opt = opt or torch.optim.Adam(nets["params"], lr=lr, weight_decay=weight_decay)
     examples = [{"state": r["state"], "legal_action_ids": r["legal_action_ids"],
                 "visit_distribution": r["pi"], "value_target": r["z"]}
                for r in replay_rows]
-    import torch
-    opt = torch.optim.Adam(nets["params"], lr=lr, weight_decay=weight_decay)
     epoch_reports = [s1.train_step(nets, examples, reg, lr=lr,
                                    weight_decay=weight_decay, opt=opt)
                      for _ in range(epochs)]
-    return {"nets": nets, "epoch_reports": epoch_reports,
+    return {"nets": nets, "opt": opt, "epoch_reports": epoch_reports,
            "examples_used": epoch_reports[-1]["examples_used"] if epoch_reports else 0,
            "final_policy_loss": epoch_reports[-1]["policy_loss"] if epoch_reports else None,
            "final_value_loss": epoch_reports[-1]["value_loss"] if epoch_reports else None}
@@ -800,7 +891,8 @@ class AlphaZeroSelectionError(Exception):
 
 def alphazero_select_two(candidates: list[dict], spec: dict, ctx_id: str, *,
                          value_ckpt=None, seed: int = 0,
-                         config: AlphaZeroConfig | None = None) -> dict:
+                         config: AlphaZeroConfig | None = None,
+                         nets: dict | None = None) -> dict:
     """Same external contract as the retired puct_select_two(): validated
     LLM candidates in, exactly two topology objects out, ready for
     size_and_predict(). Unlike the retired selector, the two outputs can
@@ -816,12 +908,14 @@ def alphazero_select_two(candidates: list[dict], spec: dict, ctx_id: str, *,
     This is the exact visit-count-ranking convention the retired selector
     already used (rank candidates by N, take the top SELECT_K), applied
     over the FULL tree instead of only root children -- which is what
-    lets an edited descendant compete for a slot at all. A hash visited
-    at multiple nodes (via repeated SELECT jumps back to it) has its
-    visits SUMMED, not just the max taken, so revisits are not
-    undercounted. Uses ONLY search-internal evidence (N) -- never MB-SAC
-    or authoritative SPICE, which would leak downstream truth backward
-    into topology selection.
+    lets an edited descendant compete for a slot at all. Visits are
+    SUMMED per canonical hash (not just the max taken) so a hash reached
+    via more than one node is not undercounted -- since Campaign 01B's
+    Section 1 fix, SELECT is legal only once (at the super-root), so this
+    mainly matters for a hash two different seeds' edit sequences happen
+    to converge on, not repeated re-selection. Uses ONLY search-internal
+    evidence (N) -- never MB-SAC or authoritative SPICE, which would leak
+    downstream truth backward into topology selection.
 
     This chosen rule already satisfies every "preferred behavior" Section
     3 lists (search evidence, visit-count semantics, validated states,
@@ -830,6 +924,16 @@ def alphazero_select_two(candidates: list[dict], spec: dict, ctx_id: str, *,
     alternative per-seed-independent-trees clause in the same section
     does not apply here, since this architecture never produces "one
     final trajectory per seed" to begin with.
+
+    `nets` may be passed in (default None -> load_alphazero_nets(
+    value_ckpt)) so a controlled/mocked network can be substituted for
+    testing -- e.g. proving an edited descendant CAN win a top-2 slot
+    given a value net that genuinely prefers one (Section 1's two-phase
+    action space makes an edited node structurally deeper than an
+    unedited seed, hence visit-capped by its own parent's N, so this is
+    no longer something an untrained/near-random G0 reliably produces
+    within a small simulation budget -- the mechanism itself still needs
+    proving directly).
     """
     if len(candidates) < 2:
         raise AlphaZeroSelectionError(
@@ -838,7 +942,7 @@ def alphazero_select_two(candidates: list[dict], spec: dict, ctx_id: str, *,
     cfg = config or AlphaZeroConfig(seed=seed)
     reg = LLMSeededEditRegistry(candidates)
     root_state = build_root_state(spec, ctx_id, reg.seed_ids)
-    nets = load_alphazero_nets(value_ckpt, seed=0)
+    nets = nets or load_alphazero_nets(value_ckpt, seed=0)
     root, mcts = _search_from_state(root_state, reg, reg.seed_ids, nets, cfg)
 
     by_hash: dict[str, dict] = {}

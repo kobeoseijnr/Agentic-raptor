@@ -91,16 +91,51 @@ def test_derive_edited_is_deterministic_and_cached():
 # ---------------------------------------------------------------------------
 # legal action generation / application
 # ---------------------------------------------------------------------------
-def test_generate_alphazero_actions_offers_real_edit_types():
+def test_super_root_offers_only_select_actions():
+    """Section 1 (Campaign 01B): the virtual super-root's ONLY legal
+    actions are SELECT_EXISTING_TOPOLOGY -- no edits, no a_keep, no
+    a_term. Postmortem on CAMPAIGN_01_ATTEMPT_1: the previous version
+    offered edits AND selects AND a_keep simultaneously at the root."""
     cands = _real_candidates(2)
     reg = az.LLMSeededEditRegistry(cands)
     state = az.build_root_state(SPEC, "az_test", reg.seed_ids)
     legal, _rejections = az.generate_alphazero_actions(state, reg, reg.seed_ids)
+    assert legal, "no legal action at the super-root"
+    assert all(a.action_type == Stage3E1ActionType.SELECT_EXISTING_TOPOLOGY
+              for a in legal)
+    assert all(a.action_id.startswith("a_sel_") for a in legal)
+    assert not any(a.action_id == "a_keep" for a in legal)
+    assert not any(a.action_id == "a_term" for a in legal)
+    assert {a.source_ref for a in legal} <= set(reg.seed_ids)
+
+
+def test_post_selection_offers_edits_and_terminate_never_select():
+    """Section 1: once committed to a seed, SELECT_EXISTING_TOPOLOGY must
+    NEVER be offered again -- only real structural edits and TERMINATE."""
+    cands = _real_candidates(2)
+    reg = az.LLMSeededEditRegistry(cands)
+    root_state = az.build_root_state(SPEC, "az_test", reg.seed_ids)
+    seed_id = reg.seed_ids[0]
+    select_action = Stage3E1Action(f"a_sel_{seed_id}",
+                                   Stage3E1ActionType.SELECT_EXISTING_TOPOLOGY,
+                                   source_ref=seed_id)
+    committed_state = az.apply_alphazero_action(root_state, select_action, reg)
+    assert committed_state.topology_id == seed_id
+
+    legal, _rejections = az.generate_alphazero_actions(committed_state, reg, reg.seed_ids)
     edit_actions = [a for a in legal if a.action_type in az.AZ_EDIT_ACTION_TYPES]
-    assert edit_actions, "no real structural-edit action was ever legal at the root"
-    assert any(a.action_id == "a_keep" for a in legal)
+    assert edit_actions, "no real structural-edit action was legal post-selection"
     assert any(a.action_id == "a_term" for a in legal)
-    assert any(a.action_id.startswith("a_sel_") for a in legal)
+    assert not any(a.action_type == Stage3E1ActionType.SELECT_EXISTING_TOPOLOGY
+                  for a in legal), "SELECT re-offered after seed commitment"
+    assert not any(a.action_id == "a_keep" for a in legal)
+
+    # depth > super-root, still no SELECT, even after an edit is applied
+    edit_action = next(a for a in edit_actions)
+    edited_state = az.apply_alphazero_action(committed_state, edit_action, reg)
+    legal2, _ = az.generate_alphazero_actions(edited_state, reg, reg.seed_ids)
+    assert not any(a.action_type == Stage3E1ActionType.SELECT_EXISTING_TOPOLOGY
+                  for a in legal2), "SELECT re-offered at depth > 1"
 
 
 def test_apply_alphazero_action_edit_changes_topology_and_hash():
@@ -175,13 +210,18 @@ def test_node_N_W_Q_consistency(small_search_result):
 def test_selected_topology_is_a_registered_real_topology(small_search_result):
     """"proposal_root" is never returned directly (run_alphazero_search
     resolves it to seed_ids[0], since it's always an alias for that seed's
-    own borrowed graph) -- but landing on an UNEDITED seed is still a
-    legitimate outcome: the search can rationally decide a_term beats
-    every edit/reseed option it explored within budget."""
+    own borrowed graph). Since Section 1 (Campaign 01B), the super-root's
+    ONLY legal actions are SELECT_EXISTING_TOPOLOGY, so run_alphazero_
+    search()'s root-level `selected_topology_id` (best_child of the ROOT
+    specifically, see stage3e1.search_result) is always one of the
+    ORIGINAL seed ids -- an edited descendant can still win a slot in
+    alphazero_select_two()'s whole-tree ranking (see
+    test_alphazero_select_two_can_pick_an_edited_descendant), just never
+    at this single root-level readout."""
     sel = small_search_result["selected_topology_id"]
     assert sel is not None
     assert sel != "proposal_root"
-    assert sel in small_search_result["seed_ids"] or "~" in sel
+    assert sel in small_search_result["seed_ids"]
 
 
 def test_puct_score_matches_documented_equation():
@@ -230,6 +270,239 @@ def test_terminate_action_sets_terminal_reason():
 
 
 # ---------------------------------------------------------------------------
+# Section 2/4/5 (Campaign 01B): termination, root exploration, sampling --
+# a controlled/fixed policy_forward lets these be proven mechanically
+# rather than hoping a real untrained net happens to behave as needed.
+# ---------------------------------------------------------------------------
+def _fixed_policy_forward(weight_fn):
+    """A drop-in nets["policy_forward"] replacement returning a FIXED
+    distribution (weight_fn(action) -> relative weight) instead of a real
+    network's output -- used to force specific, reproducible search
+    behavior for mechanical proofs."""
+    import torch
+
+    def _fwd(state, actions, reg):
+        actions = sorted(actions, key=lambda a: a.action_id)
+        weights = torch.tensor([max(float(weight_fn(a)), 1e-6) for a in actions],
+                               dtype=torch.float32)
+        probs = weights / weights.sum()
+        lg = torch.log(probs)
+        return actions, lg, probs
+    return _fwd
+
+
+def test_terminate_can_occur_before_max_edit_depth():
+    """Section 2 (Campaign 01B): a controlled policy that overwhelmingly
+    prefers TERMINATE_SEARCH once it is offered (i.e. post-selection) must
+    make the episode end well before max_episode_depth -- proving
+    TERMINATE is genuinely reachable at any post-selection step, not
+    artificially forced to run the full depth (as every one of
+    CAMPAIGN_01_ATTEMPT_1's 8 real episodes in fact did)."""
+    cands = _real_candidates(2)
+    nets = az.load_alphazero_nets(seed=0)
+    biased = dict(nets)
+    biased["policy_forward"] = _fixed_policy_forward(
+        lambda a: 40.0 if a.action_type == Stage3E1ActionType.TERMINATE_SEARCH else 1.0)
+    cfg = az.AlphaZeroConfig(alphazero_simulations_per_move=32,
+                             alphazero_max_edit_depth=4, seed=0)
+    ep = az.run_alphazero_episode(cands, SPEC, "term_test", "term_test_hash",
+                                  seed=0, config=cfg, max_episode_depth=4,
+                                  deterministic=True, nets=biased)
+    assert len(ep["steps"]) < 4, "episode ran to full depth despite a policy that heavily favors TERMINATE"
+    assert ep["steps"][-1]["selected_action_type"] == "TERMINATE_SEARCH"
+
+
+def test_dirichlet_noise_enabled_only_when_training_mode_true():
+    """Section 4 (Campaign 01B): AlphaZeroConfig.dirichlet_epsilon/alpha
+    must actually reach stage3e1's existing root-noise machinery, and only
+    take effect when training_mode=True. Compares root-child PRIORS (not
+    N, which also depends on simulation order) across two different
+    cfg.seed values: identical priors regardless of seed when
+    training_mode=False (pure policy_forward, deterministic); DIFFERENT
+    priors when training_mode=True with dirichlet_epsilon > 0 (numpy
+    Dirichlet noise keyed by seed)."""
+    cands = _real_candidates(2)
+    reg = az.LLMSeededEditRegistry(cands)
+    root_state = az.build_root_state(SPEC, "az_test", reg.seed_ids)
+    nets = az.load_alphazero_nets(seed=0)
+
+    def _priors(training_mode, seed):
+        cfg = az.AlphaZeroConfig(alphazero_simulations_per_move=1,
+                                 alphazero_max_edit_depth=2,
+                                 training_mode=training_mode,
+                                 dirichlet_epsilon=0.25, dirichlet_alpha=0.3, seed=seed)
+        root, _mcts = az._search_from_state(root_state, reg, reg.seed_ids, nets, cfg)
+        return {c.action.action_id: c.prior for c in root.children}
+
+    off_a, off_b = _priors(False, 0), _priors(False, 1)
+    assert off_a == pytest.approx(off_b, abs=1e-9), \
+        "priors differed across seeds with training_mode=False -- noise leaked outside training"
+
+    on_a, on_b = _priors(True, 0), _priors(True, 1)
+    assert any(abs(on_a[k] - on_b[k]) > 1e-6 for k in on_a), \
+        "priors were identical across seeds with training_mode=True -- Dirichlet noise never applied"
+
+
+def test_alphazero_select_two_never_gets_training_mode_noise_by_default():
+    """Section 4's IMPORTANT note: FULL selection (live inference) must
+    never see root exploration noise. alphazero_select_two()'s default
+    AlphaZeroConfig() has training_mode=False -- verified directly on the
+    dataclass default, not just by convention."""
+    assert az.AlphaZeroConfig().training_mode is False
+
+
+def test_episode_deterministic_mode_is_reproducible():
+    """Section 5: deterministic=True (validation/paper-inference shape)
+    must be exactly reproducible -- no RNG draw ever influences which
+    action is taken."""
+    cands = _real_candidates(2)
+    cfg = az.AlphaZeroConfig(alphazero_simulations_per_move=16,
+                             alphazero_max_edit_depth=2, seed=0)
+    a = az.run_alphazero_episode(cands, SPEC, "det_test", "det_test_hash",
+                                 seed=0, config=cfg, max_episode_depth=2,
+                                 deterministic=True)
+    b = az.run_alphazero_episode(cands, SPEC, "det_test", "det_test_hash",
+                                 seed=0, config=cfg, max_episode_depth=2,
+                                 deterministic=True)
+    assert [s["selected_action_id"] for s in a["steps"]] == \
+        [s["selected_action_id"] for s in b["steps"]]
+
+
+def test_deterministic_and_stochastic_modes_can_diverge():
+    """Section 5: deterministic=False (TRAIN collection) must be CAPABLE
+    of sampling a different action than the deterministic max-visit
+    choice when pi assigns real probability elsewhere -- proven with a
+    near-uniform fixed policy (both SELECT actions at the super-root get
+    comparable visit counts) and a small search over rollout seeds."""
+    cands = _real_candidates(2)
+    nets = az.load_alphazero_nets(seed=0)
+    uniform = dict(nets)
+    uniform["policy_forward"] = _fixed_policy_forward(lambda a: 1.0)
+    cfg = az.AlphaZeroConfig(alphazero_simulations_per_move=16,
+                             alphazero_max_edit_depth=1,
+                             alphazero_temperature=1.0, seed=0)
+    det = az.run_alphazero_episode(cands, SPEC, "temp_test", "temp_test_hash",
+                                   seed=0, config=cfg, max_episode_depth=1,
+                                   deterministic=True, nets=uniform)
+    det_action = det["steps"][0]["selected_action_id"]
+    diverged = False
+    for seed in range(8):
+        st = az.run_alphazero_episode(cands, SPEC, "temp_test", "temp_test_hash",
+                                      seed=seed, config=cfg, max_episode_depth=1,
+                                      deterministic=False, nets=uniform)
+        if st["steps"][0]["selected_action_id"] != det_action:
+            diverged = True
+            break
+    assert diverged, "stochastic sampling never diverged from the deterministic choice across 8 seeds"
+
+
+# ---------------------------------------------------------------------------
+# Section 3 (Campaign 01B): per-episode RNG derivation
+# ---------------------------------------------------------------------------
+def test_stable_episode_rng_seed_deterministic_across_reruns():
+    a = az.stable_episode_rng_seed(0, "AZ_G1", "spechash123", 0)
+    b = az.stable_episode_rng_seed(0, "AZ_G1", "spechash123", 0)
+    assert a == b
+
+
+def test_stable_episode_rng_seed_differs_across_specs():
+    a = az.stable_episode_rng_seed(0, "AZ_G1", "spec_a", 0)
+    b = az.stable_episode_rng_seed(0, "AZ_G1", "spec_b", 0)
+    assert a != b
+
+
+def test_stable_episode_rng_seed_differs_across_rollout_seeds():
+    a = az.stable_episode_rng_seed(0, "AZ_G1", "spechash123", 0)
+    b = az.stable_episode_rng_seed(0, "AZ_G1", "spechash123", 1)
+    assert a != b
+
+
+def test_stable_episode_rng_seed_differs_across_campaign_seeds():
+    a = az.stable_episode_rng_seed(0, "AZ_G1", "spechash123", 0)
+    b = az.stable_episode_rng_seed(7, "AZ_G1", "spechash123", 0)
+    assert a != b
+
+
+def test_episode_uses_stable_rng_seed_not_rollout_seed_alone():
+    """The exact bug found via CAMPAIGN_01_ATTEMPT_1: every episode
+    previously called random.Random(seed) with `seed` being ONLY the
+    rollout seed. run_alphazero_episode's returned episode_rng_seed must
+    match stable_episode_rng_seed()'s own derivation, and two episodes
+    that differ only in spec_hash must get DIFFERENT episode_rng_seed."""
+    cands = _real_candidates(2)
+    cfg = az.AlphaZeroConfig(alphazero_simulations_per_move=8,
+                             alphazero_max_edit_depth=1, seed=0)
+    ep_a = az.run_alphazero_episode(cands, SPEC, "rng_test", "hash_a", seed=0,
+                                    campaign_seed=3, config=cfg, max_episode_depth=1,
+                                    generation_id="AZ_G1")
+    ep_b = az.run_alphazero_episode(cands, SPEC, "rng_test", "hash_b", seed=0,
+                                    campaign_seed=3, config=cfg, max_episode_depth=1,
+                                    generation_id="AZ_G1")
+    assert ep_a["episode_rng_seed"] == az.stable_episode_rng_seed(3, "AZ_G1", "hash_a", 0)
+    assert ep_a["episode_rng_seed"] != ep_b["episode_rng_seed"]
+
+
+# ---------------------------------------------------------------------------
+# Section 6 (Campaign 01B): spec-conditioning audit
+# ---------------------------------------------------------------------------
+def test_spec_conditioning_changes_policy_and_value_outputs():
+    """Section 6: feeding the SAME topology state with two meaningfully
+    different specs must change the policy logits and/or the value
+    scalar -- an untrained net is not required to make GOOD decisions,
+    but its outputs must not be spec-invariant (which would indicate a
+    disconnected/missing conditioning path)."""
+    import torch
+
+    nets = az.load_alphazero_nets(seed=0)
+    cands = _real_candidates(1)
+    reg = az.LLMSeededEditRegistry(cands)
+    state_a = az.build_root_state(SPEC, "az_test", reg.seed_ids)
+    alt_spec = {**SPEC, "gain_target_db": SPEC["gain_target_db"] + 40.0,
+               "phase_margin_target_deg": SPEC["phase_margin_target_deg"] - 20.0}
+    state_b = az.build_root_state(alt_spec, "az_test", reg.seed_ids)
+    legal, _ = az.generate_alphazero_actions(state_a, reg, reg.seed_ids)
+
+    _, logits_a, _probs_a = nets["policy_forward"](state_a, legal, reg)
+    v_a = nets["value_forward"](state_a, reg)["scalar"]
+    _, logits_b, _probs_b = nets["policy_forward"](state_b, legal, reg)
+    v_b = nets["value_forward"](state_b, reg)["scalar"]
+
+    assert not torch.allclose(logits_a, logits_b, atol=1e-6), \
+        "policy logits identical across distinct specs -- spec conditioning may be disconnected"
+    assert abs(v_a.item() - v_b.item()) > 1e-6, \
+        "value scalar identical across distinct specs -- spec conditioning may be disconnected"
+
+
+def test_spec_conditioning_pathway_receives_gradient():
+    """Section 6: gradients must actually propagate from BOTH the policy
+    and value outputs back through the spec-conditioning pathway, and the
+    resulting parameter gradients must genuinely DEPEND on which spec was
+    fed in (not just be nonzero from some spec-independent shortcut)."""
+    nets = az.load_alphazero_nets(seed=0)
+    cands = _real_candidates(1)
+    reg = az.LLMSeededEditRegistry(cands)
+    state_a = az.build_root_state(SPEC, "az_test", reg.seed_ids)
+    alt_spec = {**SPEC, "gain_target_db": SPEC["gain_target_db"] + 40.0}
+    state_b = az.build_root_state(alt_spec, "az_test", reg.seed_ids)
+    legal, _ = az.generate_alphazero_actions(state_a, reg, reg.seed_ids)
+
+    def _grads_for(state):
+        for p in nets["params"]:
+            p.grad = None
+        _, _lg, probs = nets["policy_forward"](state, legal, reg)
+        v = nets["value_forward"](state, reg)["scalar"]
+        (probs.sum() + v).backward()
+        return [p.grad.clone() for p in nets["params"] if p.grad is not None]
+
+    grads_a = _grads_for(state_a)
+    grads_b = _grads_for(state_b)
+    assert grads_a, "backward() produced no gradients at all -- pathway is dead"
+    assert any(g.abs().sum() > 0 for g in grads_a), "all gradients were exactly zero"
+    assert any((ga - gb).abs().sum() > 1e-8 for ga, gb in zip(grads_a, grads_b)), \
+        "gradients identical across distinct specs -- spec pathway carries no real signal"
+
+
+# ---------------------------------------------------------------------------
 # episode / replay / training / generations (Section 25 categories)
 # ---------------------------------------------------------------------------
 @pytest.fixture(scope="module")
@@ -260,6 +533,32 @@ def test_episode_state_topology_changes_across_steps(small_episode):
     assert ids[0] == "proposal_root"
     if len(ids) > 1:
         assert len(set(ids)) > 1, "episode never actually moved states"
+
+
+def test_terminal_topology_hash_reflects_the_true_final_state(small_episode):
+    """Bug found via a real campaign dry-run: `steps` only ever records a
+    state BEFORE its own action is applied, so the truly terminal state
+    (after the LAST action) is never itself a step -- episode[
+    "terminal_topology_hash"] must be computed from the real final state,
+    never derived as steps[-1]["state_graph_hash"] (that's the SECOND-TO-
+    LAST state, off by one)."""
+    reg = small_episode["registry"]
+    expected = reg.get_topology(small_episode["terminal_topology_id"]).graph.structural_hash()
+    assert small_episode["terminal_topology_hash"] == expected
+    if small_episode["steps"]:
+        # only coincidentally equal to the last step's PRE-action hash when
+        # the last action was the no-op-shaped TERMINATE_SEARCH (KEEP_
+        # TOPOLOGY no longer exists in the action space, Section 1); for a
+        # real SELECT/edit step (the common case) they must differ.
+        last_step = small_episode["steps"][-1]
+        if last_step["selected_action_type"] != "TERMINATE_SEARCH":
+            assert small_episode["terminal_topology_hash"] != last_step["state_graph_hash"]
+
+
+def test_build_replay_rows_terminal_hash_matches_episode_terminal_hash(small_episode):
+    rows = az.build_replay_rows(small_episode, FAKE_TERMINAL)
+    for r in rows:
+        assert r["terminal_topology_hash"] == small_episode["terminal_topology_hash"]
 
 
 def test_build_replay_rows_schema_and_z_propagation(small_episode):
@@ -360,23 +659,45 @@ def test_alphazero_select_two_returns_distinct_canonical_hashes():
 
 
 def test_alphazero_select_two_can_pick_an_edited_descendant():
-    """Not guaranteed on every spec/seed (depends on the value net's own
-    scoring), but must be POSSIBLE -- ran with a wide simulation budget
-    across a few seeds until one produces an edited top-2 pick, proving
-    the mechanism, not asserting it always happens."""
-    cands = _real_candidates(4)
-    cfg = az.AlphaZeroConfig(alphazero_simulations_per_move=64,
+    """Must be POSSIBLE for an edited descendant to win a top-2 slot, not
+    guaranteed for a real, untrained net on an arbitrary seed. Since
+    Section 1 (Campaign 01B)'s two-phase action space made edited nodes
+    structurally one level deeper than the seed they descend from (N(seed)
+    = sum of N over ALL its children, so a seed's own N necessarily
+    upper-bounds any single edit beneath it) -- an untrained G0's fairly
+    flat, weakly-differentiated value estimates no longer reliably produce
+    this outcome within a small simulation budget purely by chance (this
+    was tried up to 512 simulations x 10 seeds x {2, 4} candidates with
+    the real net and never once won). This is an EXPECTED, correct
+    consequence of the fix (edits are no longer direct root children),
+    not a regression -- proven here instead with a controlled value net
+    that strongly and specifically prefers one real, legally-derived
+    edited state over everything else (including the alternate seed),
+    which is exactly the shape a genuinely TRAINED value net's confident
+    preference would take."""
+    import torch
+
+    cands = _real_candidates(2)
+    reg = az.LLMSeededEditRegistry(cands)
+    target_tid = reg.derive_edited(reg.seed_ids[0], "ADD_VERIFIED_STAGE")
+    base_nets = az.load_alphazero_nets(seed=0)
+    real_value_forward = base_nets["value_forward"]
+
+    def _targeted_value_forward(state, r):
+        out = dict(real_value_forward(state, r))
+        out["scalar"] = (torch.tensor(1.0) if state.topology_id == target_tid
+                         else torch.tensor(-1.0))
+        return out
+
+    nets = {**base_nets, "value_forward": _targeted_value_forward}
+    cfg = az.AlphaZeroConfig(alphazero_simulations_per_move=128,
                              alphazero_max_edit_depth=4, seed=0)
-    found = False
-    for seed in range(4):
-        sel = az.alphazero_select_two(cands, SPEC, "sel2_edit_test", seed=seed,
-                                      config=az.AlphaZeroConfig(
-                                          alphazero_simulations_per_move=64,
-                                          alphazero_max_edit_depth=4, seed=seed))
-        if any(c["is_edited_descendant"] for c in sel["selected"]):
-            found = True
-            break
-    assert found, "no edited descendant ever won a top-2 slot across 4 seeds"
+    sel = az.alphazero_select_two(cands, SPEC, "sel2_edit_test", seed=0,
+                                  config=cfg, nets=nets)
+    assert any(c["is_edited_descendant"] and c["llm_proposal_id"] == target_tid
+              for c in sel["selected"]), (
+        f"targeted edited descendant {target_tid!r} never won a top-2 slot: "
+        f"{sel['ranked_all'][:5]}")
 
 
 def test_direct_prior_select_two_never_uses_search():
@@ -472,7 +793,15 @@ def test_illegal_edit_is_excluded_from_legal_actions_not_just_apply():
     stage present."""
     cands = _real_candidates(1)
     reg = az.LLMSeededEditRegistry(cands)
-    state = az.build_root_state(SPEC, "az_test", reg.seed_ids)
+    root_state = az.build_root_state(SPEC, "az_test", reg.seed_ids)
+    seed_id = reg.seed_ids[0]
+    select_action = Stage3E1Action(f"a_sel_{seed_id}",
+                                   Stage3E1ActionType.SELECT_EXISTING_TOPOLOGY,
+                                   source_ref=seed_id)
+    # edits are only ever offered post-selection (Section 1) -- the
+    # legality probe under test must be exercised on such a state, not
+    # the super-root (which no longer offers edits at all).
+    state = az.apply_alphazero_action(root_state, select_action, reg)
     legal, rejections = az.generate_alphazero_actions(state, reg, reg.seed_ids)
     rejected_ids = {r["action_id"] for r in rejections}
     legal_ids = {a.action_id for a in legal}
