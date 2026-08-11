@@ -42,7 +42,10 @@ def _load_family_surrogate(family: str, path=None):
             return None, None
         mp = {"surrogate": src}
         net = torch.nn.Sequential(torch.nn.Linear(N_KNOBS, 32),
-                                  torch.nn.ReLU(), torch.nn.Linear(32, 2))
+                                  torch.nn.ReLU(), torch.nn.Linear(32, 3))
+        # A stale 2-output checkpoint (pre-UGBW) raises a shape mismatch here,
+        # which the caller's try/except turns into "surrogate unavailable" --
+        # not a crash, and not a silent wrong-shaped load.
         net.load_state_dict(torch.load(mp["surrogate"], weights_only=True))
         net.eval()                                  # frozen for inference
         for p in net.parameters():
@@ -109,15 +112,17 @@ def predict_post_sac(spec: dict, topology_hash: str, topology_family: str,
     """Predict the electrical outcome of ONE sized design. Never calls ngspice.
 
     Anything the surrogate cannot predict is returned as None. It is a
-    two-output model (PM, gain), so UGBW, power and area are UNKNOWN -- and
-    must stay unknown rather than being filled with plausible constants,
-    because `predicted_feasible_for(spec)` treats a missing required
-    constraint as "cannot say", which is the honest answer.
+    THREE-output model (PM, gain, UGBW): UGBW was added because the ranker
+    choosing which design gets verified was previously blind to the
+    constraint responsible for most measured failures. Power and area are
+    still UNKNOWN and must stay so -- `predicted_feasible_for(spec)` treats a
+    missing required constraint as "cannot say", which is the honest answer.
     """
-    from agentic_raptor.mb_sac.spec_sizing import KNOB_HI, KNOB_NAMES
+    from agentic_raptor.mb_sac.spec_sizing import (KNOB_HI, KNOB_NAMES,
+                                                   UGBW_LOG_HI, UGBW_LOG_LO)
     fam = checkpoint_family or topology_family
     net, ckpt_hash = _load_family_surrogate(fam, surrogate_path)
-    gain = pm = None
+    gain = pm = ugbw = None
     unc = None
     op_p = stab_p = None
     if net is not None and sizing_vector:
@@ -127,15 +132,30 @@ def predict_post_sac(spec: dict, topology_hash: str, topology_family: str,
             knobs = torch.tensor([float(sizing_vector.get(k, 1.0))
                                   for k in KNOB_NAMES])
             x = knobs / hi
+
+            def _decode_ugbw(v: float) -> float | None:
+                # inverse of _ugbw_target: v<=0 means "at/below the band
+                # floor" -- report unknown rather than a specific tiny Hz
+                # value the model was never actually trained to mean
+                if v <= 1e-6:
+                    return None
+                log = UGBW_LOG_LO + max(0.0, min(1.0, v)) * (
+                    UGBW_LOG_HI - UGBW_LOG_LO)
+                return float(10 ** log)
+
             if uncertainty_method == "mc_dropout":
                 mean, std = _mc_dropout_predict(net, x)
-                pm, gain = float(mean[0]) * 90.0, float(mean[1]) * 100.0
-                # normalised spread across both heads, clipped to [0, 1]
-                unc = float(min(1.0, (float(std[0]) + float(std[1])) / 2.0))
+                pm = float(mean[0]) * 90.0
+                gain = float(mean[1]) * 100.0
+                ugbw = _decode_ugbw(float(mean[2]))
+                # normalised spread across all three heads, clipped to [0, 1]
+                unc = float(min(1.0, (float(std[0]) + float(std[1])
+                                      + float(std[2])) / 3.0))
             else:                      # explicitly named baseline arm
                 with torch.no_grad():
                     out = net(x)
                 pm, gain = float(out[0]) * 90.0, float(out[1]) * 100.0
+                ugbw = _decode_ugbw(float(out[2]))
                 unc = None
             # stability probability derives from the predicted margin and its
             # spread, not from a hard-coded constant
@@ -146,15 +166,15 @@ def predict_post_sac(spec: dict, topology_hash: str, topology_family: str,
             else:
                 stab_p = 1.0 if pm > 0 else 0.0
         except Exception:
-            gain = pm = unc = stab_p = None
+            gain = pm = ugbw = unc = stab_p = None
     # the surrogate models no operating-point head: UNKNOWN, not 0.9
     op_p = None
-    margins = _normalized_margins(spec, gain, pm, None)
+    margins = _normalized_margins(spec, gain, pm, ugbw)
     return SurrogatePrediction(
         topology_hash=topology_hash,
         sizing_manifest_hash=sizing_manifest_hash,
         gain_db=gain, pm_deg=pm,
-        ugbw_hz=None,        # not modelled -> unknown
+        ugbw_hz=ugbw,
         power_w=None,        # not modelled -> unknown
         area_um2=None,       # not modelled -> unknown
         operating_point_probability=op_p,
@@ -162,4 +182,4 @@ def predict_post_sac(spec: dict, topology_hash: str, topology_family: str,
         normalized_margins=margins,
         predictive_uncertainty=unc,
         surrogate_checkpoint_hash=ckpt_hash,
-        feature_schema_version=f"post_sac_surrogate.v1+{uncertainty_method}")
+        feature_schema_version=f"post_sac_surrogate.v2_ugbw+{uncertainty_method}")

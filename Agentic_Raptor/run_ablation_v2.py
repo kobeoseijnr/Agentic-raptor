@@ -52,7 +52,11 @@ ARMS = {
 def row_from_trace(t: dict, arm: str, spec_index: int, seed: int,
                    seconds: float) -> dict:
     s3 = t.get("stage3_propose") or {}
-    s5 = t.get("stage5_puct") or {}
+    # 2026-08-11: run_pipeline's trace key is now "stage5_alphazero" (the
+    # retired root-PUCT selector was replaced) -- "stage5_puct" is read as
+    # a fallback so historical trace files produced before the migration
+    # still parse.
+    s5 = t.get("stage5_alphazero") or t.get("stage5_puct") or {}
     s8 = t.get("stage8_ranker") or {}
     s9 = t.get("stage9_verification") or {}
     s11 = t.get("stage11_feedback") or {}
@@ -92,6 +96,11 @@ def main():
     ap.add_argument("--seeds", default="0")
     ap.add_argument("--split", default="heldout")
     ap.add_argument("--budget", type=int, default=16)
+    ap.add_argument("--sizing-repeats", type=int, default=1,
+                    help="size each selected branch this many times (best "
+                         "attempt kept) -- see run_raptor_v2.py for why. "
+                         "Default 1 keeps existing behaviour; costs roughly "
+                         "N x the sizing time per run")
     ap.add_argument("--adapter", default=str(ADAPTER))
     ap.add_argument("--calibrate", action="store_true",
                     help="verify BOTH designs every run (slower; only needed "
@@ -133,6 +142,7 @@ def main():
                         model, tok, str(adapter), split=args.split,
                         spec_index=idx, budget=args.budget,
                         calibrate=args.calibrate, seed=seed,
+                        sizing_repeats=args.sizing_repeats,
                         out_prefix=f"ABL_{arm}_s{seed}", **cfg)
                     row = row_from_trace(tr, arm, idx, seed, time.time() - t0)
                 except Exception as exc:

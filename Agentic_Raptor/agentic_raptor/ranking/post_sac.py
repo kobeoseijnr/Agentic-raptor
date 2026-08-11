@@ -34,8 +34,13 @@ log = logging.getLogger(__name__)
 
 _ROOT = Path(__file__).resolve().parents[2]
 QUEUE = _ROOT / "datasets/ranker_preference_queue"
-TRUSTED = QUEUE / "trusted_pairs.jsonl"
-PROVISIONAL = QUEUE / "provisional_pairs.jsonl"
+#: Stage 1.6: versioned -- the prior trusted_pairs.jsonl mixes pairs whose
+#: outcome_a/outcome_b were measured under the pre-C_LOAD-fix environment
+#: (measured directly: 144/186 stated a load != 500pF, see
+#: agentic_raptor.publication.artifact_provenance). New pairs go to a fresh
+#: file; the original is preserved untouched as PRE_CLOAD_FIX evidence.
+TRUSTED = QUEUE / "trusted_pairs_post_cload_v1.jsonl"
+PROVISIONAL = QUEUE / "provisional_pairs_post_cload_v1.jsonl"
 
 #: documented stability thresholds (Part 6)
 STABLE_P = 0.75
@@ -278,14 +283,22 @@ def record_pair(spec: dict, a: PostSACDesign, b: PostSACDesign,
                 out_b: AuthoritativeSpiceOutcome | None,
                 pred_a: SurrogatePrediction | None = None,
                 pred_b: SurrogatePrediction | None = None,
-                ranker_choice: str | None = None) -> dict:
-    """Write a ranker-training pair.
+                ranker_choice: str | None = None,
+                persist: bool = True) -> dict:
+    """Compute (and, unless ``persist=False``, write) a ranker-training pair.
 
     TRUSTED requires full provenance on BOTH sides -- `bool(outcome)` is not
     proof of authoritative measurement, which is exactly how a predicted
     result could otherwise be laundered into the training queue.
+
+    ``persist=False`` is for FROZEN ablation evaluation runs (A0-A8):
+    ``status``/``ranker_correct``/provenance are still computed and returned
+    for the caller's own trace/diagnostics, but nothing is appended to
+    ``trusted_pairs.jsonl``/``provisional_pairs.jsonl`` -- an evaluation run
+    must never silently grow the ranker's training queue.
     """
-    QUEUE.mkdir(parents=True, exist_ok=True)
+    if persist:
+        QUEUE.mkdir(parents=True, exist_ok=True)
     spec_id = spec.get("spec_id") or spec.get("context_id") or ""
     spec_hash = spec.get("spec_hash")
     prob_a = _provenance_ok(a, out_a, spec_id, spec_hash)
@@ -303,21 +316,33 @@ def record_pair(spec: dict, a: PostSACDesign, b: PostSACDesign,
            "outcome_a": asdict(out_a) if out_a else None,
            "outcome_b": asdict(out_b) if out_b else None,
            "ranker_choice": ranker_choice,
-           "provenance_problems": {"A": prob_a, "B": prob_b}}
+           "provenance_problems": {"A": prob_a, "B": prob_b},
+           # Stage 1.6: this code path resolves load through
+           # effective_c_load() by construction -- any pair recorded here
+           # is POST_CLOAD_FIX_V1. outcome_a/outcome_b.c_load_f (already
+           # populated by outcome_from_sizing) carry the actual per-side
+           # simulated load if the two ever needed to differ.
+           "electrical_environment_version": "POST_CLOAD_FIX_V1",
+           "requested_c_load_f": (spec.get("load_capacitance_pf") * 1e-12
+                                  if spec.get("load_capacitance_pf") is not None
+                                  else None)}
     if trusted:
         winner, reason = measured_preference(out_a, out_b)
         if winner is None:
             rec["status"] = "dropped_tie"
-            _append(PROVISIONAL, rec)
+            if persist:
+                _append(PROVISIONAL, rec)
             return rec
         rec.update(chosen=winner, rejected=("B" if winner == "A" else "A"),
                    reason=reason, status="trusted",
                    ranker_correct=(ranker_choice == winner
                                    if ranker_choice else None))
-        _append(TRUSTED, rec)
+        if persist:
+            _append(TRUSTED, rec)
     else:
         rec["status"] = "provisional_incomplete_provenance"
-        _append(PROVISIONAL, rec)
+        if persist:
+            _append(PROVISIONAL, rec)
     return rec
 
 
@@ -326,11 +351,16 @@ def _append(path: Path, rec: dict):
         f.write(json.dumps(rec, default=str) + "\n")
 
 
-def trusted_pairs() -> list:
-    if not TRUSTED.is_file():
+def trusted_pairs(path: Path | None = None) -> list:
+    """`path` overrides the default TRUSTED file -- used to train on a
+    filtered/clean snapshot (e.g. provenance-verified-only pairs) without
+    touching the live file a running calibration batch may still be
+    appending to."""
+    p = path or TRUSTED
+    if not p.is_file():
         return []
     return [json.loads(x) for x in
-            TRUSTED.read_text(encoding="utf-8").splitlines() if x.strip()]
+            p.read_text(encoding="utf-8").splitlines() if x.strip()]
 
 
 def ranker_accuracy() -> dict:

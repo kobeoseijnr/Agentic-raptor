@@ -407,12 +407,28 @@ class SearchConfig:
 
 class TopologyMCTS:
     def __init__(self, nets: dict, reg: TopologyRegistry, pool_ids: list[str],
-                 cfg: SearchConfig):
+                 cfg: SearchConfig, *, generate_actions_fn=None,
+                 apply_action_fn=None):
+        """generate_actions_fn / apply_action_fn default to this module's
+        own generate_actions() / apply_topology_action() -- every existing
+        caller (FamilyRegistry-based value training, run_puct_ablation.py,
+        run_raptor_v2.puct_select_two, the stage3e1/search_actions/true_rl
+        test suites) is unaffected. They exist so
+        agentic_raptor.topology_rl.alphazero can reuse this exact engine
+        (PUCT selection, progressive expansion, leaf evaluation, backup)
+        with a richer action-generation/application pair -- real
+        multi-type structural edits (stage3e2_edits.EDIT_TEMPLATES) instead
+        of the single hardcoded ADD_EXISTING_SUPPORTED_COMPENSATION_
+        STRUCTURE action this module's own generate_actions() exposes --
+        without forking the search loop itself.
+        """
         apply_torch_omp_workaround()
         import numpy as np
 
         self.rng = np.random.default_rng(cfg.seed)
         self.nets, self.reg, self.pool_ids, self.cfg = nets, reg, pool_ids, cfg
+        self._generate_actions = generate_actions_fn or generate_actions
+        self._apply_action = apply_action_fn or apply_topology_action
         self.costs = MCTSCosts()
         self.leaf_cache: dict[str, dict] = {}
         self.rejections: list[dict[str, str]] = []
@@ -431,8 +447,8 @@ class TopologyMCTS:
 
     def _expand(self, node: Node) -> None:
         import torch
-        acts, rej = generate_actions(node.state, self.reg, self.pool_ids,
-                                     self.cfg.max_children)
+        acts, rej = self._generate_actions(node.state, self.reg, self.pool_ids,
+                                           self.cfg.max_children)
         self.costs.validator_calls += 1
         self.rejections += rej
         if not acts:
@@ -452,7 +468,7 @@ class TopologyMCTS:
                       for p, n in zip(priors, noise)]
         for a, p in zip(acts, priors):
             try:
-                child_state = apply_topology_action(node.state, a, self.reg)
+                child_state = self._apply_action(node.state, a, self.reg)
             except ValueError as exc:
                 self.rejections.append({"action_id": a.action_id, "reason": str(exc)})
                 continue
@@ -599,11 +615,22 @@ def train_step(nets: dict, examples: list[dict], reg: TopologyRegistry,
         if ex["value_target"] is None:
             continue   # never train on fabricated outcomes
         st = TopologySearchState(**{k: v for k, v in ex["state"].items()})
+        # 2026-08-11: extended for AlphaZero replay (agentic_raptor.
+        # topology_rl.alphazero) -- action ids of the form
+        # "a_edit_<Stage3E1ActionType value>" reconstruct as that real
+        # structural-edit action type, source_ref=the CURRENT state (an
+        # edit always applies to where the trajectory currently is, never
+        # to an arbitrary other topology). Every id shape this branch
+        # replaces (a_sel_*/a_keep/a_term-only) still resolves exactly as
+        # before -- purely additive.
         acts = [Stage3E1Action(a, Stage3E1ActionType.SELECT_EXISTING_TOPOLOGY,
                                source_ref=a.replace("a_sel_", ""))
                 if a.startswith("a_sel_") else
                 Stage3E1Action(a, Stage3E1ActionType.KEEP_TOPOLOGY, source_ref=st.topology_id)
                 if a == "a_keep" else
+                Stage3E1Action(a, Stage3E1ActionType[a.replace("a_edit_", "")],
+                               source_ref=st.topology_id)
+                if a.startswith("a_edit_") else
                 Stage3E1Action(a, Stage3E1ActionType.TERMINATE_SEARCH)
                 for a in ex["legal_action_ids"]]
         acts_o, logits, _p = nets["policy_forward"](st, acts, reg)

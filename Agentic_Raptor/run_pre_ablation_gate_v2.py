@@ -104,9 +104,19 @@ def run_checks() -> list:
     cks.append(c)
 
     # 5 one PUCT root with exactly five LLM actions
-    c = Check(5, "One PUCT root has exactly five LLM actions")
+    # 2026-08-11: this check is specific to the RETIRED root-level PUCT
+    # architecture (exactly one "a_sel_*" action per LLM candidate at a
+    # single root). TRUE_ALPHAZERO's root legal-action set is richer
+    # (keep/term/select-per-seed/real-edit actions) and has no reason to
+    # equal 5 -- reported NOT VERIFIED for post-migration traces rather
+    # than silently reinterpreted or left to report a misleading FAIL.
+    c = Check(5, "One PUCT root has exactly five LLM actions (retired-"
+             "architecture check)")
     if t is None:
         c.set(NOTVER, "no runtime trace")
+    elif "stage5_alphazero" in t:
+        c.set(NOTVER, "root-level PUCT retired -- see TRUE_ALPHAZERO's own "
+             "tree_nodes/max_depth_reached in stage5_alphazero instead")
     else:
         s5 = t.get("stage5_puct") or {}
         c.set(PASS if (s5.get("root_action_count") == 5
@@ -115,14 +125,14 @@ def run_checks() -> list:
               f"single_root={s5.get('single_root')}")
     cks.append(c)
 
-    # 6 PUCT returns exactly two
-    c = Check(6, "PUCT returns exactly two")
+    # 6 topology search returns exactly two
+    c = Check(6, "Topology search returns exactly two")
     if t is None:
         c.set(NOTVER, "no runtime trace")
     else:
-        c.set(PASS if (t.get("stage5_puct") or {}).get("selected_count") == 2
-              else FAIL,
-              f"selected={(t.get('stage5_puct') or {}).get('selected_count')}")
+        s5 = t.get("stage5_alphazero") or t.get("stage5_puct") or {}
+        c.set(PASS if s5.get("selected_count") == 2 else FAIL,
+              f"selected={s5.get('selected_count')}")
     cks.append(c)
 
     # 7 two independent sizing branches

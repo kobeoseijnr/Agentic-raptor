@@ -214,6 +214,9 @@ def c9s_size(topology_id: str, graph, spec: dict, exe, out_dir: Path,
         learning starts from knowledge instead of noise.
     """
     import torch
+
+    from agentic_raptor.electrical import effective_c_load
+    cl = effective_c_load(spec)
     torch.manual_seed(seed)
     rng = Random(seed)
     n_seed = min(5, max(3, budget // 3))
@@ -246,7 +249,7 @@ def c9s_size(topology_id: str, graph, spec: dict, exe, out_dir: Path,
 
     def run(knobs, tag, origin):
         m = measure(topology_id, apply_knobs(graph, knobs), exe, out_dir,
-                    tag, costs)
+                    tag, costs, c_load_f=cl)
         r, mv = feasibility_reward(m, spec)
         rec = {**m, "reward": float(r), "origin": origin,
                "knobs": dict(zip(KNOB_NAMES,
@@ -341,12 +344,14 @@ def hybrid_size(topology_id: str, graph, spec: dict, exe, out_dir: Path,
     """C9 production candidate. Budget split: seeds (<=6) then repair/refine.
     Phases emerge from the worst-constraint logic: convergence -> stability
     -> gain/UGBW -> quality, without hiding any constraint."""
+    from agentic_raptor.electrical import effective_c_load
+    cl = effective_c_load(spec)
     rng = Random(seed)
     results, log = [], []
 
     def run(knobs, tag, origin):
         m = measure(topology_id, apply_knobs(graph, knobs), exe, out_dir,
-                    tag, costs)
+                    tag, costs, c_load_f=cl)
         r, mv = feasibility_reward(m, spec)
         rec = {**m, "reward": float(r), "origin": origin,
                "knobs": dict(zip(KNOB_NAMES,

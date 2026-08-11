@@ -279,7 +279,7 @@ class TestPersistentMemory:
         monkeypatch.setattr(ss, "DYNAMICS_FILE", tmp_path / "dyn.jsonl")
         monkeypatch.setattr(ss, "REPLAY_FILE", tmp_path / "rep.jsonl")
 
-        def fake_measure(tid, graph, exe, out_dir, tag, costs):
+        def fake_measure(tid, graph, exe, out_dir, tag, costs, **_kw):
             w = sum(d.sizing["w"] for d in graph.devices
                     if d.kind in ("nmos", "pmos"))
             return {"gain_db": 40 + w / 10, "pm_deg": 50.0, "ugbw_hz": None,
@@ -466,7 +466,7 @@ class TestC9sTrueSAC:
         from agentic_raptor.mapping import map_family
         from agentic_raptor.mb_sac import hybrid_sizing as hs
 
-        def fake_measure(tid, graph, exe, out_dir, tag, costs):
+        def fake_measure(tid, graph, exe, out_dir, tag, costs, **_kw):
             w = sum(d.sizing["w"] for d in graph.devices
                     if d.kind in ("nmos", "pmos"))
             return {"gain_db": 40 + w / 8, "pm_deg": 50.0, "ugbw_hz": None,

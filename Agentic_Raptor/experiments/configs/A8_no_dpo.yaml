@@ -1,0 +1,36 @@
+ablation_id: A8
+name: NO_LEARNED_DPO_RANKER
+question: Does learned post-SAC ranking improve final candidate selection over the
+  hard safety gate alone?
+use_llm: true
+use_rag: true
+use_sft: true
+use_exclusion_conditioning: true
+use_mcts: true
+use_puct: true
+use_sac: true
+sizing_method: sac
+use_surrogate: true
+use_sizing_ranker: true
+use_dpo: false
+learning_mode: frozen
+budget:
+  proposal_count_k: 5
+  validated_candidate_budget: 5
+  topologies_sent_to_sizing: 2
+  mcts_simulations: null
+  sizing_repeats: 1
+  max_optimization_spice_calls: 32
+  max_sizing_steps: 32
+  final_verification_calls: 1
+  pvt:
+    enabled: false
+    process_corners:
+    - tt
+    supply_voltages:
+    - 1.8
+    temperatures_c:
+    - 27.0
+    required_corner_ids: null
+  wallclock_limit_s: null
+requires_puct_value_checkpoint: true

@@ -40,6 +40,15 @@ SRC = ROOT / "artifacts/stage3e4/corpus.json"
 #: which of these may actually be used as targets.
 ALL_FAMILIES = ["2s_none", "2s_miller", "2s_rc", "3s_miller", "3s_rc"]
 EXCLUDE_LINE = "### EXCLUDE "
+#: run_family_spec_gate_bufsfb.py's output -- a SECOND structural axis
+#: (output_buffer, local_feedback) that target_for() used to hard-code to
+#: (False, False) for every family. Optional: if this file doesn't exist
+#: yet (the gate hasn't been run), realizable_variants() below falls back
+#: to exactly today's behaviour -- one (family, False, False) target per
+#: realizable family -- so this script keeps working unchanged until the
+#: gate is actually run.
+EXTENDED_GATE = (ROOT / "artifacts/publication_v2/family_spec_gate"
+                 / "SUMMARY_bufsfb.json")
 
 
 def realizable_families() -> tuple:
@@ -82,14 +91,34 @@ def family_of(stages: int, comp: str) -> str:
     return f"{stages}s_{comp}"
 
 
-def target_for(fam: str) -> tuple:
-    """Canonical response text + full-graph hash for a family."""
+def target_for(fam: str, buf: bool = False, fb: bool = False) -> tuple:
+    """Canonical response text + full-graph hash for a (family, buf, fb)."""
     stages, comp = int(fam[0]), fam.split("_", 1)[1]
-    text = variant_text(stages, comp, False, False)
+    text = variant_text(stages, comp, buf, fb)
     return text, variant_hash(json.loads(text))
 
 
-def soft_family_order(spec: dict, families) -> list:
+def realizable_variants(fams) -> list:
+    """(family, buf, fb) triples this corpus may target.
+
+    Always includes (fam, False, False) for every realizable family -- the
+    proven baseline every prior run and comparison used. Adds (fam, buf, fb)
+    for combos run_family_spec_gate_bufsfb.py has verified realizable, if
+    that gate has been run; otherwise this is identical to the old
+    family-only target space.
+    """
+    variants = [(f, False, False) for f in fams]
+    if EXTENDED_GATE.is_file():
+        d = json.loads(EXTENDED_GATE.read_text(encoding="utf-8"))
+        for key in d.get("realizable_combos", []):
+            combo = (d.get("combos") or {}).get(key) or {}
+            f, buf, fb = combo.get("family"), combo.get("buf"), combo.get("fb")
+            if f in fams and (f, buf, fb) not in variants:
+                variants.append((f, buf, fb))
+    return variants
+
+
+def soft_family_order(spec: dict, variants) -> list:
     """Step 3: specification INFLUENCES order, it never determines one answer.
 
     The old rule emitted a single family. This ranks plausibility -- more
@@ -97,25 +126,34 @@ def soft_family_order(spec: dict, families) -> list:
     every realizable family stays a legitimate target, because the stage-rule
     battery measured the hard version false (its only exact pass was a
     2s_none design the rule rejected).
+
+    variants are now (family, buf, fb) triples, not bare family strings.
+    Primary sort key is variant_rank (0 = proven family baseline, 1 = one
+    structural addition, 2 = both) so at the current default of 5 targets,
+    every family's (buf=False, fb=False) baseline is chosen BEFORE any
+    buf/fb bonus variant -- identical output to before this axis existed.
+    Bonus variants only get chosen once --targets is raised past 5.
     """
     gain = float(spec.get("gain_target_db") or 0.0)
     pm = float(spec.get("phase_margin_target_deg") or 45.0)
 
-    def score(fam):
+    def family_score(fam):
         stages, comp = int(fam[0]), fam.split("_", 1)[1]
         s = 0.0
         s += 0.25 * (stages - 2) * max(-1.0, min(1.0, (gain - 70.0) / 40.0))
         if comp != "none":
             s += 0.25 * max(-1.0, min(1.0, (pm - 45.0) / 20.0))
         return -s
-    return sorted(families, key=lambda f: (score(f), f))
+    return sorted(variants, key=lambda v: (int(v[1]) + int(v[2]),
+                                          family_score(v[0]), v[0], v[1], v[2]))
 
 
 def build(n_targets: int, max_share: float, with_exclusions: bool) -> dict:
     src = json.loads(SRC.read_text(encoding="utf-8"))
     fams, fam_status = realizable_families()
     fams = [f for f in ALL_FAMILIES if f in fams]
-    n_targets = min(n_targets, len(fams))
+    variants = realizable_variants(fams)
+    n_targets = min(n_targets, len(variants))
 
     train = [r for r in src["records"] if r["split"] == "train"]
     before = Counter(f"{r['stages']}s_{r['comp']}" for r in train)
@@ -128,20 +166,20 @@ def build(n_targets: int, max_share: float, with_exclusions: bool) -> dict:
         spec = ig.parse_spec(r["prompt"])
         if not spec:
             continue
-        order = soft_family_order(spec, fams)
+        order = soft_family_order(spec, variants)
         chosen, seen_hashes = [], set()
-        for fam in order:
+        for fam, buf, fb in order:
             if len(chosen) >= n_targets:
                 break
-            text, h = target_for(fam)
+            text, h = target_for(fam, buf, fb)
             if h in seen_hashes:            # full-graph identity, not signature
                 continue
             seen_hashes.add(h)
-            chosen.append((fam, text, h))
+            chosen.append((fam, buf, fb, text, h))
         # rebalance: if a family is over its cap, prefer the least-used ones
         if cap is not None:
             chosen.sort(key=lambda c: used[c[0]])
-        for rank, (fam, text, h) in enumerate(chosen):
+        for rank, (fam, buf, fb, text, h) in enumerate(chosen):
             used[fam] += 1
             records.append({
                 "context_id": r["context_id"],
@@ -151,7 +189,7 @@ def build(n_targets: int, max_share: float, with_exclusions: bool) -> dict:
                 "topology_signature": fam,
                 "canonical_graph_hash": h,
                 "stages": int(fam[0]), "comp": fam.split("_", 1)[1],
-                "buffer": False, "fb": False,
+                "buffer": buf, "fb": fb,
                 "split": "train", "target_rank": rank,
                 "target_source": "multi_target_soft_prior"})
         # Step 6: exclusion-conditioned examples -- the model must learn
@@ -160,8 +198,8 @@ def build(n_targets: int, max_share: float, with_exclusions: bool) -> dict:
         if with_exclusions:
             for k in range(1, len(chosen)):
                 excluded = chosen[:k]
-                nxt_fam, nxt_text, nxt_h = chosen[k]
-                ex = ", ".join(f"{f}/{hh[:12]}" for f, _t, hh in excluded)
+                nxt_fam, nxt_buf, nxt_fb, nxt_text, nxt_h = chosen[k]
+                ex = ", ".join(f"{f}/{hh[:12]}" for f, _b, _fb, _t, hh in excluded)
                 prompt = r["prompt"].replace(
                     "### PROPOSAL",
                     f"{EXCLUDE_LINE}{ex}\n### PROPOSAL")
@@ -174,7 +212,7 @@ def build(n_targets: int, max_share: float, with_exclusions: bool) -> dict:
                     "canonical_graph_hash": nxt_h,
                     "stages": int(nxt_fam[0]),
                     "comp": nxt_fam.split("_", 1)[1],
-                    "buffer": False, "fb": False,
+                    "buffer": nxt_buf, "fb": nxt_fb,
                     "split": "train", "excluded_count": k,
                     "target_source": "exclusion_conditioned"})
 
@@ -182,12 +220,24 @@ def build(n_targets: int, max_share: float, with_exclusions: bool) -> dict:
     after = Counter(r["topology_signature"] for r in all_records)
     total = sum(after.values()) or 1
     shares = {k: v / total for k, v in after.items()}
+    # Stage 1.6: this doc does no NEW electrical measurement itself -- it
+    # only reads family_spec_gate's verdicts -- so it inherits THAT gate's
+    # environment version rather than claiming its own. A corpus built from
+    # a still-PRE_CLOAD_FIX gate must say so, not silently look current.
+    gate_path = ROOT / "artifacts/publication_v2/family_spec_gate/SUMMARY.json"
+    gate_env = "UNKNOWN"
+    if gate_path.is_file():
+        gate_env = json.loads(gate_path.read_text(encoding="utf-8")).get(
+            "electrical_environment_version", "PRE_CLOAD_FIX")
     doc = {
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "source_corpus": str(SRC.relative_to(ROOT)),
         "source_corpus_hash": src.get("split_manifest", {}).get("corpus_hash"),
+        "family_gate_environment_version": gate_env,
         "realizable_families": list(fams),
         "family_gate_status": fam_status,
+        "realizable_variants": [f"{f}_buf{int(b)}_fb{int(k)}" for f, b, k in variants],
+        "extended_gate_used": EXTENDED_GATE.is_file(),
         "targets_per_spec": n_targets,
         "exclusion_conditioned": with_exclusions,
         "counts": {"specs": len({r['context_id'] for r in train}),
@@ -209,7 +259,12 @@ def build(n_targets: int, max_share: float, with_exclusions: bool) -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--targets", type=int, default=5)
+    ap.add_argument("--targets", type=int, default=5,
+                    help="raise past 5 to actually draw on buf/fb bonus "
+                         "variants once run_family_spec_gate_bufsfb.py has "
+                         "been run -- at 5 (the default) only each family's "
+                         "proven buf=False,fb=False baseline is used, "
+                         "identical to before that gate existed")
     ap.add_argument("--max-family-share", type=float, default=0.30)
     ap.add_argument("--no-exclusions", action="store_true")
     args = ap.parse_args()
@@ -219,6 +274,8 @@ def main():
         json.dumps(doc, indent=1), encoding="utf-8")
     print(f"realizable families : {doc['realizable_families']} "
           f"({doc['family_gate_status']})")
+    print(f"realizable variants : {len(doc['realizable_variants'])} "
+          f"(extended buf/fb gate {'FOUND' if doc['extended_gate_used'] else 'not run yet -- family-only'})")
     print(f"targets per spec    : {doc['targets_per_spec']}")
     print(f"specs               : {doc['counts']['specs']}")
     print(f"base targets        : {doc['counts']['base_targets']}")

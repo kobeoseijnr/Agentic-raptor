@@ -110,7 +110,22 @@ _SPEC_RE = re.compile(
 
 
 def parse_spec(prompt: str) -> dict | None:
-    """Structured spec parsed from the REAL prompt. None -> quarantine (A1)."""
+    """Structured spec parsed from the REAL prompt. None -> quarantine (A1).
+
+    PROTOCOL NOTE (Stage 1.5 repair, 2026-08-09; supersedes the prior
+    "parsed but not applied" note): ``load_capacitance_pf`` IS now the
+    authoritative load for every real simulation in a spec-driven run --
+    sizing (sac_size/non-RL baselines), final verification, and every PVT
+    corner all resolve their load through
+    ``agentic_raptor.electrical.effective_c_load(spec)``, which returns
+    ``load_capacitance_pf * 1e-12`` when the spec states one, falling back
+    to ``NOMINAL_CLOAD_F`` (500pF) only when it doesn't. The 81-run pilot
+    (results_20260809_032835.jsonl) measured nominal.c_load_f == 500pF on
+    every row regardless of the spec's stated cl -- that was the bug this
+    repair fixes, not intended behaviour. A caller may still force a
+    DIFFERENT load via an explicit override (e.g. run_pipeline's
+    c_load_override_f), which is recorded, never silent.
+    """
     if not prompt:
         return None
     m = _SPEC_RE.search(prompt)

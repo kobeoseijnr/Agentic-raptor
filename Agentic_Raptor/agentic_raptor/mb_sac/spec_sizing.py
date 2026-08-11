@@ -45,8 +45,19 @@ _ROOT = Path(__file__).resolve().parents[2]
 #: persistent sizing memory (override for tests via env). The SAC nets,
 #: surrogate and BT ranker no longer start from scratch on every design —
 #: the tuner accumulates experience the same way the architect does.
+#
+# Stage 1.6: every file this warm-start mechanism reads was, before the
+# Stage 1.5 C_LOAD repair, populated from measurements that silently ran at
+# a fixed 500pF regardless of the spec (see agentic_raptor.publication.
+# artifact_provenance). Rather than a runtime gate that could be forgotten,
+# the default paths themselves moved to a `_post_cload_v1` location -- a
+# structurally empty starting point for the new electrical environment.
+# The OLD `sizing_memory/` / `dynamics_surrogate_data.jsonl` /
+# `mbsac_replay.jsonl` are left exactly where they were, untouched, as
+# PRE_CLOAD_FIX historical evidence (frozen by artifact_provenance.py).
 STATE_DIR = Path(os.environ.get(
-    "AGENTIC_RAPTOR_SIZING_MEMORY", str(_ROOT / "artifacts" / "sizing_memory")))
+    "AGENTIC_RAPTOR_SIZING_MEMORY",
+    str(_ROOT / "artifacts" / "sizing_memory_post_cload_v1")))
 # when a memory override is active (batteries/tests), experience files are
 # isolated inside it -- concurrent campaigns and batteries never share
 # append targets, so parallel runs cannot interleave/corrupt JSONL lines
@@ -54,8 +65,10 @@ if "AGENTIC_RAPTOR_SIZING_MEMORY" in os.environ:
     DYNAMICS_FILE = STATE_DIR / "dynamics_surrogate_data.jsonl"
     REPLAY_FILE = STATE_DIR / "mbsac_replay.jsonl"
 else:
-    DYNAMICS_FILE = _ROOT / "datasets/simulation_memory/dynamics_surrogate_data.jsonl"
-    REPLAY_FILE = _ROOT / "datasets/simulation_memory/mbsac_replay.jsonl"
+    DYNAMICS_FILE = (_ROOT / "datasets/simulation_memory"
+                     / "dynamics_surrogate_data_post_cload_v1.jsonl")
+    REPLAY_FILE = (_ROOT / "datasets/simulation_memory"
+                   / "mbsac_replay_post_cload_v1.jsonl")
 
 #: stage-1 device roles (five-transistor first stage); everything else FET is
 #: treated as stage 2 / output.
@@ -130,6 +143,29 @@ ACTION_SPACE = {
 }
 N_KNOBS = len(ACTION_SPACE)
 KNOB_NAMES = sorted(ACTION_SPACE, key=lambda k: ACTION_SPACE[k]["index"])
+
+#: UGBW spans decades (1 kHz .. 100 MHz+), so the surrogate's third output
+#: is log10(Hz), clamped to a plausible band and scaled to sit near the same
+#: numeric range as the pm/90 and gain/100 outputs. This scale is shared with
+#: ranking/surrogate.py's decode -- keep the two in sync.
+UGBW_LOG_LO, UGBW_LOG_HI = 2.0, 9.0     # 100 Hz .. 1 GHz
+
+
+def _ugbw_target(ugbw_hz) -> float:
+    """Encode a measured UGBW into the surrogate's training scale.
+
+    None (unmeasured / non-converged) trains toward the band FLOOR, not zero:
+    zero would look like ~1 Hz, a confident false claim of total failure that
+    would bias the surrogate rather than leaving it uninformed. The decoder
+    in ranking/surrogate.py treats the surrogate as advisory in all cases and
+    never asserts authoritative=True regardless.
+    """
+    import math
+    if ugbw_hz is None or ugbw_hz <= 0:
+        return 0.0
+    log = math.log10(ugbw_hz)
+    log = max(UGBW_LOG_LO, min(UGBW_LOG_HI, log))
+    return (log - UGBW_LOG_LO) / (UGBW_LOG_HI - UGBW_LOG_LO)
 KNOB_LO = [ACTION_SPACE[k]["lo"] for k in KNOB_NAMES]
 KNOB_HI = [ACTION_SPACE[k]["hi"] for k in KNOB_NAMES]
 
@@ -185,15 +221,35 @@ def apply_knobs(graph, knobs: list) -> object:
 
 
 def measure(topology_id: str, graph, exe, out_dir: Path, tag: str,
-            costs) -> dict:
-    """One real ngspice qualification -> full metric dict (never fabricated)."""
+            costs, *, pdk_file=None, supply_voltage: float | None = None,
+            temperature_c: float | None = None,
+            c_load_f: float | None = None) -> dict:
+    """One real ngspice qualification -> full metric dict (never fabricated).
+
+    ``pdk_file``/``supply_voltage``/``temperature_c`` default to nominal (tt
+    corner, 1.8 V, 27 C). ``c_load_f`` ALSO defaults to NOMINAL_CLOAD_F
+    (500pF) if left None -- but as of the Stage 1.5 C_LOAD repair
+    (2026-08-09), every spec-driven caller (sac_size, achievability_sweep,
+    the non-RL sizing baselines, run_raptor_v2.py's final verify()) resolves
+    the spec's real requested load via agentic_raptor.electrical.
+    effective_c_load() FIRST and always passes it explicitly here. A bare
+    `measure(...)` call with no c_load_f is now a deliberate, spec-agnostic
+    diagnostic call (e.g. a feasibility-gate probe), not the normal path.
+    """
+    from agentic_raptor.electrical import NOMINAL_CLOAD_F
     from agentic_raptor.topology_rl.stage3e2_edits import qualify_device_graph
-    q = qualify_device_graph(topology_id, graph, Path(out_dir), exe, tag, costs)
+    q = qualify_device_graph(topology_id, graph, Path(out_dir), exe, tag, costs,
+                             pdk_file=pdk_file, supply_voltage=supply_voltage,
+                             temperature_c=temperature_c, c_load_f=c_load_f)
     m = q.get("metrics") or {}
     return {"gain_db": m.get("dc_gain_db"),
             "pm_deg": m.get("phase_margin_deg"),
             "ugbw_hz": m.get("ugbw_hz"),
             "power_w": m.get("quiescent_power_w"),
+            # idd_a: TOTAL measured supply current (real op-point branch
+            # current, |V1#branch|) -- never the MB-SAC Ibias design knob.
+            "idd_a": m.get("idd_a"),
+            "c_load_f": c_load_f if c_load_f is not None else NOMINAL_CLOAD_F,
             "stable": q.get("stability") == "verified_stable",
             "stability": q.get("stability"),
             "electrical": q.get("electrical"),
@@ -457,14 +513,25 @@ def _try_load(path: Path, module) -> bool:
         return False        # schema drift -> start fresh, never crash
 
 
-_GLOBAL_DYNAMICS = _ROOT / "datasets/simulation_memory/dynamics_surrogate_data.jsonl"
+# Pre-campaign audit fix (2026-08-09): this MUST track DYNAMICS_FILE's
+# non-sandboxed default, not a hardcoded path. Before this fix it pointed
+# at the OLD, unversioned dynamics_surrogate_data.jsonl even after
+# DYNAMICS_FILE itself moved to the _post_cload_v1 file (Stage 1.6) --
+# meaning every sandboxed sac_size() call would have silently blended
+# PRE_CLOAD_FIX rows into its "global" read, exactly the mixing this whole
+# repair exists to prevent. The old file is untouched, still readable
+# directly for provenance if ever needed, just no longer auto-merged in.
+_GLOBAL_DYNAMICS = (_ROOT / "datasets/simulation_memory"
+                    / "dynamics_surrogate_data_post_cload_v1.jsonl")
 
 
 def _dynamics_rows(family: str, limit: int = 400) -> list:
     """Family-labelled experience. Sandboxed runs WRITE only to their own
-    file but READ the global history too (read-only access is safe under
-    concurrency) -- otherwise offline pretraining starts blind in every
-    sandbox."""
+    file but READ the global (non-sandboxed) history too (read-only access
+    is safe under concurrency) -- otherwise offline pretraining starts
+    blind in every sandbox. Both DYNAMICS_FILE and _GLOBAL_DYNAMICS are
+    POST_CLOAD_FIX_V1 paths; there is no PRE_CLOAD_FIX fallback here by
+    design."""
     sources = [DYNAMICS_FILE]
     if _GLOBAL_DYNAMICS not in sources and _GLOBAL_DYNAMICS.is_file():
         sources.append(_GLOBAL_DYNAMICS)
@@ -552,7 +619,7 @@ def sac_size(topology_id: str, graph, spec: dict, exe, out_dir: Path, costs,
              use_ranker: bool = True,
              ranker_spec_conditioned: bool = True,
              sequential: bool = True, gamma: float = 0.99,
-             tau: float = 0.005) -> dict:
+             tau: float = 0.005, c_load_f: float | None = None) -> dict:
     """Spec-conditioned SAC sizing under a fixed real-SPICE budget.
 
     With `family` set and persist=True, the SAC nets and surrogate warm-start
@@ -574,8 +641,14 @@ def sac_size(topology_id: str, graph, spec: dict, exe, out_dir: Path, costs,
     from agentic_raptor.corpus import TopologyRegistry
     from agentic_raptor.dpo import FEATURE_DIM, DPOConfig, DPORanker
     from agentic_raptor.dpo.preference_pairs import OutcomeRecord, build_pairs
+    from agentic_raptor.electrical import effective_c_load
     from agentic_raptor.mb_sac.stage3d2 import V3
     torch.manual_seed(seed)
+    # Stage 1.5 repair: every real measurement this run takes must simulate
+    # against the SAME load, resolved once here rather than left to default
+    # (previously every measure() call below omitted c_load_f entirely and
+    # silently got NOMINAL_CLOAD_F regardless of what `spec` asked for).
+    cl = effective_c_load(spec, override=c_load_f)
     reward_fn = reward_fn or spec_reward
     ranker = ranker or DPORanker(FEATURE_DIM, DPOConfig(enabled=True,
                                                         seed=seed))
@@ -600,8 +673,17 @@ def sac_size(topology_id: str, graph, spec: dict, exe, out_dir: Path, costs,
     log_alpha = torch.zeros(1, requires_grad=True)
     opt_al = torch.optim.Adam([log_alpha], lr=3e-3)
     target_entropy = -float(N_KNOBS)
+    # THREE outputs: pm, gain, ugbw (log10 Hz). UGBW was silent for the
+    # ranker's whole existence -- the surrogate predicted only pm/gain, so
+    # worst_predicted_violation was blind to the constraint that caused most
+    # measured failures (12 of 19 in the first ablation). A ranker scoring on
+    # a blind metric can end up preferring the WORSE design with high
+    # confidence: on the pairs the deployed checkpoint trained on, even a
+    # linear model correctly regularised learned a positive weight on
+    # worst_violation (should be negative) -- not overfitting, the visible
+    # features genuinely pointed the wrong way without ugbw to check them.
     surrogate = torch.nn.Sequential(torch.nn.Linear(N_KNOBS, 32),
-                                    torch.nn.ReLU(), torch.nn.Linear(32, 2))
+                                    torch.nn.ReLU(), torch.nn.Linear(32, 3))
     opt_s = torch.optim.Adam(surrogate.parameters(), lr=1e-2)
     # -------- warm start from persistent memory (family-keyed) --------------
     memory = {"family": family, "loaded_nets": False, "loaded_surrogate": False,
@@ -621,7 +703,8 @@ def sac_size(topology_id: str, graph, spec: dict, exe, out_dir: Path, costs,
                     e = rows[ep % len(rows)]
                     kn = torch.tensor([float(e["knobs"][k])
                                        for k in KNOB_NAMES]) / hi
-                    y = torch.tensor([e["pm"] / 90, (e["gain"] or 0) / 100])
+                    y = torch.tensor([e["pm"] / 90, (e["gain"] or 0) / 100,
+                                      _ugbw_target(e.get("ugbw_hz"))])
                     ls_ = ((surrogate(kn) - y) ** 2).mean()
                     opt_s.zero_grad(); ls_.backward(); opt_s.step()
                 memory["surrogate_pretrain_rows"] = len(rows)
@@ -702,7 +785,7 @@ def sac_size(topology_id: str, graph, spec: dict, exe, out_dir: Path, costs,
         else:                       # SR0/SR1: no learned ordering
             a_t, knobs, _f = batch[0]
         meas = measure(topology_id, apply_knobs(graph, knobs), exe, out_dir,
-                       f"sz{seed}_{step}", costs)
+                       f"sz{seed}_{step}", costs, c_load_f=cl)
         _rout = reward_fn(meas, spec)
         r, mv = (_rout if isinstance(_rout, tuple)
                  else (_rout, margin_vector(meas, spec)))
@@ -774,8 +857,8 @@ def sac_size(topology_id: str, graph, spec: dict, exe, out_dir: Path, costs,
                         for _p, _pt in zip(_q.parameters(), _qt.parameters()):
                             _pt.mul_(1 - tau).add_(tau * _p)
         if meas["pm_deg"] is not None and use_surrogate:
-            y = torch.tensor([meas["pm_deg"] / 90,
-                              (meas["gain_db"] or 0) / 100])
+            y = torch.tensor([meas["pm_deg"] / 90, (meas["gain_db"] or 0) / 100,
+                              _ugbw_target(meas.get("ugbw_hz"))])
             ls_ = ((surrogate(knobs / hi) - y) ** 2).mean()
             opt_s.zero_grad(); ls_.backward(); opt_s.step()
         # spec-conditioned ranker training from same-context real outcomes
@@ -828,22 +911,33 @@ def sac_size(topology_id: str, graph, spec: dict, exe, out_dir: Path, costs,
         fam["rows"] += len(results)
         fam["last_updated"] = time.time()
         meta["schema"] = f"{SCHEMA}_k{N_KNOBS}"
+        # Stage 1.6: the sidecar meta.json, not the raw-state_dict .pt
+        # files, is where this warm-start memory's environment version
+        # lives -- see artifact_provenance.current_environment_version().
+        meta["electrical_environment_version"] = "POST_CLOAD_FIX_V1"
         mp["meta"].write_text(json.dumps(meta, indent=1), encoding="utf-8")
         DYNAMICS_FILE.parent.mkdir(parents=True, exist_ok=True)
         with DYNAMICS_FILE.open("a", encoding="utf-8") as f:
             for r in results:
-                f.write(json.dumps({"family": family, "knobs": r["knobs"],
-                                    "pm": r["pm_deg"], "gain": r["gain_db"],
-                                    "ugbw_hz": r.get("ugbw_hz"),
-                                    "stable": bool(r.get("stable")),
-                                    "spec": {k: spec.get(k) for k in
-                                             ("gain_target_db",
-                                              "phase_margin_target_deg",
-                                              "load_capacitance_pf",
-                                              "ugbw_target_hz")}}) + "\n")
+                f.write(json.dumps({
+                    "family": family, "knobs": r["knobs"],
+                    "pm": r["pm_deg"], "gain": r["gain_db"],
+                    "ugbw_hz": r.get("ugbw_hz"),
+                    "stable": bool(r.get("stable")),
+                    "requested_c_load_f": spec.get("load_capacitance_pf") * 1e-12
+                    if spec.get("load_capacitance_pf") is not None else None,
+                    "simulated_c_load_f": r.get("c_load_f"),
+                    "electrical_environment_version": "POST_CLOAD_FIX_V1",
+                    "spec": {k: spec.get(k) for k in
+                             ("gain_target_db",
+                              "phase_margin_target_deg",
+                              "load_capacitance_pf",
+                              "ugbw_target_hz")}}) + "\n")
         with REPLAY_FILE.open("a", encoding="utf-8") as f:
             for tr in transitions:
-                f.write(json.dumps(dict(tr, family=family)) + "\n")
+                f.write(json.dumps(dict(
+                    tr, family=family,
+                    electrical_environment_version="POST_CLOAD_FIX_V1")) + "\n")
         memory["persisted"] = True
     best = max(results, key=lambda r: r["reward"])
     outcome = postsizing_outcome(best, spec)
@@ -875,6 +969,9 @@ def achievability_sweep(topology_id: str, graph, spec: dict, exe,
     """Targeted diagnostic sweep over the most gain-sensitive variables to
     decide family_capacity_limited vs SAC_optimization_failure."""
     from random import Random
+
+    from agentic_raptor.electrical import effective_c_load
+    cl = effective_c_load(spec)
     rng = Random(seed)
     results = []
     # half the budget on a structured gain-oriented grid, half random
@@ -890,7 +987,7 @@ def achievability_sweep(topology_id: str, graph, spec: dict, exe,
                       for lo, hi in zip(KNOB_LO, KNOB_HI)])
     for i, knobs in enumerate(picks):
         meas = measure(topology_id, apply_knobs(graph, knobs), exe, out_dir,
-                       f"sweep{i}", costs)
+                       f"sweep{i}", costs, c_load_f=cl)
         results.append({"knobs": dict(zip(KNOB_NAMES,
                                           [round(k, 3) for k in knobs])),
                         **{k: meas[k] for k in ("gain_db", "pm_deg",

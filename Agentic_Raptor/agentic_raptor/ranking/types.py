@@ -210,6 +210,14 @@ class AuthoritativeSpiceOutcome:
     pm_deg: float | None = None
     ugbw_hz: float | None = None
     power_w: float | None = None
+    # idd_a: TOTAL measured supply current (real ngspice op-point branch
+    # current). Never the MB-SAC Ibias design/optimizer knob -- see
+    # agentic_raptor.electrical.fom for the distinction this feeds.
+    idd_a: float | None = None
+    # c_load_f: the load capacitance ACTUALLY applied by the testbench that
+    # produced this measurement (not necessarily the spec's `cl=` target --
+    # see agentic_raptor.electrical.NOMINAL_CLOAD_F).
+    c_load_f: float | None = None
     area_um2: float | None = None
     robustness: float | None = None          # e.g. PVT success fraction
     hard_constraints_passed: int = 0
@@ -261,6 +269,7 @@ def outcome_from_sizing(outcome: dict, *, call_id: str, topology_hash: str,
         stability_status=stab or None,
         gain_db=best.get("gain_db"), pm_deg=best.get("pm_deg"),
         ugbw_hz=best.get("ugbw_hz"), power_w=best.get("power_w"),
+        idd_a=best.get("idd_a"), c_load_f=best.get("c_load_f"),
         hard_constraints_passed=outcome.get("hard_constraints_passed", 0),
         hard_constraints_total=outcome.get("hard_constraints_total", 0),
         normalized_distance_to_feasibility=outcome.get(

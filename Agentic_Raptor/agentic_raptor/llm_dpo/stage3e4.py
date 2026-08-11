@@ -313,13 +313,24 @@ def build_corpus() -> dict[str, Any]:
 
 
 def run_sft(steps: int = 400, seed: int = 0, corpus_path: Path | None = None,
-            out_dir: Path | None = None) -> dict[str, Any]:
+            out_dir: Path | None = None, lr: float = 3e-4) -> dict[str, Any]:
     """Supervised fine-tune of the topology proposer.
 
     corpus_path / out_dir default to the originals, so existing callers are
     unaffected. They exist so the repaired corpus can be trained to a NEW
     adapter: overwriting artifacts/stage3e4/sft_adapter in place would destroy
     the baseline checkpoint every diversity comparison is measured against.
+
+    lr defaults to 3e-4 (unchanged, so every existing caller trains
+    identically). SFT self-improvement generations (agentic_raptor.
+    selfimprove_v2.sft_self_improvement) always initialise a FRESH LoRA
+    adapter from the base model (load_models() has no "resume adapter"
+    path) and rely on replaying the structural corpus alongside the new
+    verified examples to avoid catastrophic forgetting -- see that module's
+    docstring. They pass a lower, explicitly conservative lr because this
+    corpus already contains the full base corpus PLUS new material, so a
+    fresh run at the original from-scratch rate would let the new examples
+    dominate the early gradient steps disproportionately.
     """
     import torch
     t0 = time.time()
@@ -329,7 +340,7 @@ def run_sft(steps: int = 400, seed: int = 0, corpus_path: Path | None = None,
     train = [r for r in corpus["records"] if r["split"] == "train"]
     if not train:
         raise SystemExit(f"no train records in {corpus_path}")
-    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=3e-4)
+    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
     losses = []
     rng = Random(seed)
     for step in range(steps):
@@ -341,7 +352,9 @@ def run_sft(steps: int = 400, seed: int = 0, corpus_path: Path | None = None,
     ck = Path(out_dir) if out_dir else (O4 / "sft_adapter")
     ck.parent.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(ck))
-    rec = {"steps": steps, "loss_first_last": [round(losses[0], 3), round(losses[-1], 3)],
+    rec = {"steps": steps, "seed": seed, "lr": lr,
+           "loss_first_last": [round(losses[0], 3), round(losses[-1], 3)],
+           "loss_curve": [round(v, 4) for v in losses],
            "checkpoint": str(ck), "wall_clock_s": round(time.time() - t0, 1),
            "model_id": MODEL_ID, "corpus": str(corpus_path),
            "train_records": len(train),

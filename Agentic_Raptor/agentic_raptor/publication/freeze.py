@@ -42,6 +42,19 @@ def _hash_if(path: Path, kind: str):
     return sha_file(p) if p.is_file() else "absent"
 
 
+def _alphazero_checkpoint_hash() -> dict:
+    """The PROMOTED AlphaZero checkpoint's hash, if one exists -- "no
+    promoted checkpoint yet" is an honest, expected freeze-manifest state
+    immediately after the FULL cutover migration, not an error."""
+    from agentic_raptor.topology_rl.alphazero import (
+        AlphaZeroSelectionError, require_promoted_az_checkpoint)
+    try:
+        p = require_promoted_az_checkpoint()
+        return {"status": "PROMOTED", "checkpoint_hash": _hash_if(p, "file")}
+    except AlphaZeroSelectionError as exc:
+        return {"status": "NO_PROMOTED_CHECKPOINT", "detail": str(exc)}
+
+
 def run_tests() -> dict:
     r = subprocess.run([sys.executable, "-m", "pytest", "tests/", "-q"],
                        capture_output=True, text=True, cwd=str(ROOT),
@@ -79,9 +92,14 @@ def build_manifest(latest_campaign: str | None = None,
                     "accepted": g["accepted_checkpoint_hash"],
                     "accepted_path": g["accepted_checkpoint"]}
                 for g in gens},
-            "policy_value_checkpoint":
+            # 2026-08-11: root-level PUCT retired (see
+            # artifacts/publication_v3/ROOT_LEVEL_PUCT_RETIRED.json) --
+            # replaced by TRUE_ALPHAZERO. "absent" here for the old path is
+            # the CORRECT, expected post-cutover state, not a broken freeze.
+            "policy_value_checkpoint_RETIRED":
                 _hash_if(Path("artifacts/stage3e1/policy_value_ep0.pt"),
                          "file"),
+            "alphazero_checkpoint": _alphazero_checkpoint_hash(),
             "sizing_memory": _hash_if(Path("artifacts/sizing_memory"), "dir"),
             "vlm_adapter":
                 _hash_if(Path("artifacts/stage3e4b/vlm_sft_adapter"), "dir"),

@@ -394,9 +394,16 @@ def apply_edit(g: DeviceCircuitGraph, edit_type: str) -> tuple[DeviceCircuitGrap
 
 
 def qualify_device_graph(tid: str, g: DeviceCircuitGraph, wdir: Path, exe: str,
-                         label: str, budget: dict[str, int]) -> dict[str, Any]:
+                         label: str, budget: dict[str, int], *,
+                         pdk_file=None, supply_voltage: float | None = None,
+                         temperature_c: float | None = None,
+                         c_load_f: float | None = None) -> dict[str, Any]:
     """Static validation then the verbatim Stage 3B qualification path.
-    Invalid graphs never reach ngspice."""
+    Invalid graphs never reach ngspice.
+
+    ``pdk_file``/``supply_voltage``/``temperature_c``/``c_load_f`` default to
+    nominal (tt, 1.8 V, 27 C, 500 pF); a PVT corner sweep passes them through
+    to reuse this exact real-ngspice path per corner."""
     from agentic_raptor.electrical import qualify_family
     import agentic_raptor.electrical as elec
 
@@ -420,7 +427,9 @@ def qualify_device_graph(tid: str, g: DeviceCircuitGraph, wdir: Path, exe: str,
     try:
         rec = qualify_family(fake, {"subckt_name": sub, "immediately_runnable": True,
                                     "blocking_reason": None}, cdir / "run", exe,
-                             "env-3e2", "train", 120.0)
+                             "env-3e2", "train", 120.0,
+                             pdk_file=pdk_file, supply_voltage=supply_voltage,
+                             temperature_c=temperature_c, c_load_f=c_load_f)
     finally:
         elec._LEGACY_AMP = orig
     budget["real_spice_calls"] += 1

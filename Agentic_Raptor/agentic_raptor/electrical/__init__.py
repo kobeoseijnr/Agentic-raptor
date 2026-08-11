@@ -35,8 +35,48 @@ VALIDATION_STATES = (
 
 _ROOT = Path(__file__).resolve().parents[2]
 _LEGACY_AMP = _ROOT.parent / "RAPTOR_Legacy" / "AnalogGym" / "AnalogGym" / "Amplifier"
-_PDK_TT = (_ROOT.parent / "RAPTOR_Legacy" / "AnalogGym" / "RGNN_RL" / "mosfet_model"
-           / "sky130_pdk" / "sky130_pdk" / "libs.tech" / "ngspice" / "corners" / "tt.spice")
+_PDK_CORNER_DIR = (_ROOT.parent / "RAPTOR_Legacy" / "AnalogGym" / "RGNN_RL" / "mosfet_model"
+                    / "sky130_pdk" / "sky130_pdk" / "libs.tech" / "ngspice" / "corners")
+_PDK_TT = _PDK_CORNER_DIR / "tt.spice"
+
+# The single testbench every real ngspice call in v2 uses (nominal path AND
+# PVT sweep alike): one supply rail (V1), a load resolved per-call, fixed
+# nominal voltage/temperature unless a PVT corner overrides them.
+# NOMINAL_CLOAD_F is ONLY the fallback used when no spec (or an explicit
+# override) supplies a load -- see effective_c_load() below, which is the
+# actual authoritative decision every real caller goes through as of the
+# Stage 1.5 repair (2026-08-09). Before that repair, every caller left
+# c_load_f=None and this constant was silently applied regardless of what a
+# spec's `cl=` target said; that is what effective_c_load() now fixes.
+# FoM/PVT must still read the value that was ACTUALLY simulated (never the
+# unapplied spec target) -- that discipline doesn't change, only which value
+# actually reaches the simulator now does.
+NOMINAL_CLOAD_F = 500e-12
+NOMINAL_SUPPLY_V = 1.8
+NOMINAL_TEMPERATURE_C = 27.0
+
+
+def effective_c_load(spec: dict | None, override: float | None = None) -> float:
+    """THE single authoritative decision of what load a real simulation uses.
+
+    effective = override if explicitly given
+              else spec["load_capacitance_pf"] * 1e-12 if the spec states one
+              else NOMINAL_CLOAD_F (a spec that never states a load, e.g. a
+              synthetic/legacy caller with no `cl=` field, still needs SOME
+              real number to simulate against).
+
+    Every real measure()/qualify_*/PVT call must resolve its load through
+    this function -- not by leaving c_load_f=None and letting a lower layer
+    silently default to NOMINAL_CLOAD_F, which is how the spec's requested
+    cl came to be measured but never applied (Stage 1.5 repair, 2026-08-09:
+    the 81-run pilot's nominal.c_load_f was 500pF on every row regardless of
+    the spec's stated 100pF/200pF/500pF cl -- see spec_registry.py).
+    """
+    if override is not None:
+        return float(override)
+    if spec and spec.get("load_capacitance_pf") is not None:
+        return float(spec["load_capacitance_pf"]) * 1e-12
+    return NOMINAL_CLOAD_F
 
 
 def _h(text: str) -> str:
@@ -149,8 +189,21 @@ def input_vcm_ratio(polarity: str) -> float:
     return 0.5 if polarity == "nmos" else 0.25
 
 
-def build_testbench(entry, audit: dict[str, Any]) -> str:
-    """Adapted ADM open-loop TB from the source testbench (transform log in header)."""
+def build_testbench(entry, audit: dict[str, Any], *,
+                    pdk_file: Path | None = None,
+                    supply_voltage: float | None = None,
+                    temperature_c: float | None = None,
+                    c_load_f: float | None = None) -> str:
+    """Adapted ADM open-loop TB from the source testbench (transform log in header).
+
+    ``pdk_file``/``supply_voltage``/``temperature_c``/``c_load_f`` default to
+    the nominal values (tt corner, 1.8 V, 27 C, 500 pF) so every existing
+    caller is byte-identical unless it opts into a PVT corner explicitly.
+    """
+    pdk_file = pdk_file or _PDK_TT
+    vdd = NOMINAL_SUPPLY_V if supply_voltage is None else supply_voltage
+    temp = NOMINAL_TEMPERATURE_C if temperature_c is None else temperature_c
+    cload = NOMINAL_CLOAD_F if c_load_f is None else c_load_f
     name = audit["subckt_name"]
     netlist_abs = (entry.path / "netlist.sp").resolve()
     polarity = input_pair_polarity(
@@ -167,10 +220,11 @@ def build_testbench(entry, audit: dict[str, Any]) -> str:
 .include {params_abs}
 .param mc_mm_switch=0
 .param mc_pr_switch=0
-.include {_PDK_TT.resolve()}
-.PARAM supply_voltage = 1.8
+.include {pdk_file.resolve()}
+.PARAM supply_voltage = {vdd:.6g}
 .PARAM VCM_ratio = {vcm_ratio}
-.PARAM PARAM_CLOAD = 500.00p
+.PARAM PARAM_CLOAD = {cload:.6g}
+.TEMP {temp:.6g}
 V1 vdd 0 'supply_voltage'
 V2 vss 0 0
 Vindc opin 0 'supply_voltage*VCM_ratio'
@@ -193,7 +247,16 @@ quit 0
 
 
 def qualify_family(entry, audit: dict[str, Any], run_dir: Path, exe: str,
-                   env_id: str, split: str, timeout_s: float = 180.0) -> ElectricalValidationRecord:
+                   env_id: str, split: str, timeout_s: float = 180.0, *,
+                   pdk_file: Path | None = None,
+                   supply_voltage: float | None = None,
+                   temperature_c: float | None = None,
+                   c_load_f: float | None = None) -> ElectricalValidationRecord:
+    """``pdk_file``/``supply_voltage``/``temperature_c``/``c_load_f`` default
+    to nominal (tt, 1.8 V, 27 C, 500 pF) -- passing them is how a PVT corner
+    sweep reuses this exact, real-ngspice qualification path instead of a
+    second implementation."""
+    vdd = NOMINAL_SUPPLY_V if supply_voltage is None else supply_voltage
     rec = ElectricalValidationRecord(
         topology_id=entry.topology_id, graph_hash=entry.metadata.get("graph_hash"),
         source=entry.source, simulator="ngspice", simulator_version=ngspice_version(exe) if exe else None,
@@ -210,7 +273,9 @@ def qualify_family(entry, audit: dict[str, Any], run_dir: Path, exe: str,
         rec.electrical_validation_status = "missing_dependency"
         rec.failure_class = audit["blocking_reason"]
         return rec
-    tb = build_testbench(entry, audit)
+    tb = build_testbench(entry, audit, pdk_file=pdk_file,
+                         supply_voltage=vdd, temperature_c=temperature_c,
+                         c_load_f=c_load_f)
     rec.netlist_hash = _h((entry.path / "netlist.sp").read_text(encoding="utf-8", errors="replace"))
     rec.testbench_hash = _h(tb)
     rec.validation_stage = "testbench_ready"
@@ -254,17 +319,24 @@ def qualify_family(entry, audit: dict[str, Any], run_dir: Path, exe: str,
         m = metric_reports.get(name)
         return m["value"] if m and m.get("status") == "verified" else None
 
+    idd_a = abs(ivdd) if ivdd is not None else None
     rec.extracted_metrics = {
         "dc_gain_db": _verified("dc_gain_db") if metric_reports else v.get("dcgain_db"),
         "ugbw_hz": _verified("ugbw_hz"),
         "phase_margin_deg": _verified("phase_margin_deg"),  # verified-only; else null
         "gain_margin_db": _verified("gain_margin_db"),
         "f3db_hz": _verified("f3db_hz"),
-        "quiescent_power_w": abs(ivdd) * 1.8 if ivdd is not None else None,
+        # idd_a: the TOTAL measured supply current (|V1 branch current| from
+        # the op-point) -- V1 is the circuit's one supply rail (V2 is a 0 V
+        # ground reference, not a second current path), so this is already
+        # the aggregate, not an approximation from a design/optimizer knob
+        # such as Ibias. quiescent_power_w is derived from the SAME idd_a.
+        "idd_a": idd_a,
+        "quiescent_power_w": idd_a * vdd if idd_a is not None else None,
         "output_dc_v": vout,
     }
     rec.__dict__["metric_reports"] = metric_reports  # full status/confidence detail
-    dc_ok = vout is not None and 0.02 < vout < 1.78 and ivdd is not None
+    dc_ok = vout is not None and 0.02 < vout < (vdd - 0.02) and ivdd is not None
     ac_ok = rec.extracted_metrics["dc_gain_db"] is not None
     rec.simulation_status = "converged" if (dc_ok or ac_ok) else "failed"
     if not (dc_ok or ac_ok):

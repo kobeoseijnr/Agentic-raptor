@@ -184,6 +184,8 @@ def main():
                     "an easier percentile is a legitimate target for the "
                     "specs it can serve, and must not be excluded wholesale"),
            "created": time.strftime("%Y-%m-%d %H:%M:%S")}
+    from agentic_raptor.publication.artifact_provenance import stamp
+    doc = stamp(doc, model_type="family_spec_gate")
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "SUMMARY.json").write_text(json.dumps(doc, indent=1, default=str),
                                       encoding="utf-8")

@@ -173,6 +173,20 @@ def excluded_context_ids(seeds=None) -> set:
 
     Union across seeds: a campaign at seed 11 must not train on seed 23's
     evaluation specs either, or cross-seed comparisons stop being clean.
+
+    Pre-campaign audit note (2026-08-09): context_id is a DISPLAY label,
+    not a unique key -- corpus-wide, most records share one with exactly
+    one sibling (see agentic_raptor.publication.spec_registry). This
+    function's exclusion-by-context_id is verified SAFE for its actual
+    purpose only because of an EMPIRICAL property of the current corpus:
+    zero context_id strings are shared ACROSS splits (checked directly --
+    train/heldout/blindtest context_id sets are pairwise disjoint), so a
+    train-split spec can never coincidentally match a heldout eval spec's
+    display name. That is a fact about today's corpus.json, not a
+    structural guarantee a future regeneration is bound to preserve --
+    excluded_evaluation_context_ids() below is the content-hash version
+    that doesn't depend on it, and is layered on top wherever this is used
+    for real leakage gating, not as a replacement (belt and braces).
     """
     out = set()
     for s in (available_seeds() if seeds is None else seeds):
@@ -182,6 +196,27 @@ def excluded_context_ids(seeds=None) -> set:
             continue
         for spec in doc["specs"]:
             out.add(spec["context_id"])
+    return out
+
+
+def excluded_evaluation_context_ids(seeds=None) -> set:
+    """Content-hash version of excluded_context_ids(): keyed by
+    evaluation_context_id (sha_json of the full structured spec + eval env
+    + testbench hash -- see agentic_raptor.llm_dpo.integrity), which is
+    collision-free by construction (two DIFFERENT specs cannot hash to the
+    same value) unlike context_id. Use this wherever a leakage check must
+    hold even if corpus.json is regenerated with different context_id
+    naming."""
+    out = set()
+    for s in (available_seeds() if seeds is None else seeds):
+        try:
+            doc = load(s)
+        except (FileNotFoundError, ValueError):
+            continue
+        for spec in doc["specs"]:
+            ectx = spec.get("evaluation_context_id")
+            if ectx:
+                out.add(ectx)
     return out
 
 

@@ -14,6 +14,42 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+#: probe points for the ranker monotonicity check: everything fixed except
+#: worst_predicted_violation, which must produce a STRICTLY decreasing score.
+#: Feature order matches agentic_raptor.ranking.model.FEATURE_NAMES.
+_MONO_PROBE_BASE = [0.0, 2.0, 0.0, 0.1, 0.9, 1.0, 0.5, 0.0, 1.0, 1.0, 1.0]
+_MONO_PROBE_VIOLATIONS = (0.0, 0.25, 0.5, 1.0, 2.0, 5.0, 9.9)
+
+
+def check_ranker_monotonicity(net) -> dict:
+    """Score must strictly DECREASE as worst_predicted_violation increases.
+
+    Not a formality. Retraining the exact 12-pair set the first deployed
+    checkpoint used, at increasing weight decay down to a bare linear model,
+    STILL learned a positive weight on worst_violation. That was not
+    overfitting a high-capacity net -- the visible features (gain, PM; the
+    surrogate had no UGBW output) genuinely pointed the wrong way on that
+    data. A ranker that inverts on its single most important input must never
+    be accepted, regardless of its pairwise accuracy: accuracy was 0.83 on
+    held-out pairs and the checkpoint still lost to the hand-written rule it
+    was meant to replace, because most of those pairs were ranking two
+    failures against each other rather than a real pass vs. fail.
+    """
+    import torch
+    scores = []
+    with torch.no_grad():
+        for wv in _MONO_PROBE_VIOLATIONS:
+            v = list(_MONO_PROBE_BASE); v[0] = wv
+            scores.append(float(net(torch.tensor([v], dtype=torch.float32))))
+    bad = [(a, b, sa, sb) for a, b, sa, sb in
+          zip(_MONO_PROBE_VIOLATIONS, _MONO_PROBE_VIOLATIONS[1:],
+              scores, scores[1:]) if sb >= sa]
+    return {"probe_violations": list(_MONO_PROBE_VIOLATIONS),
+            "probe_scores": [round(s, 4) for s in scores],
+            "strictly_decreasing": not bad,
+            "non_decreasing_steps": [f"{a}->{b}: {sa:+.3f}->{sb:+.3f}"
+                                     for a, b, sa, sb in bad]}
+
 
 @dataclass
 class GateResult:
@@ -34,11 +70,17 @@ def _pct(new, old):
 
 
 def ranker_gate(cand_acc: float | None, accepted_acc: float | None,
-                n_eval: int, min_eval: int = 4) -> GateResult:
-    """Held-out pairwise accuracy must not regress.
+                n_eval: int, min_eval: int = 4,
+                cand_net=None) -> GateResult:
+    """Held-out pairwise accuracy must not regress, AND must be monotone.
 
     Ties go to the INCUMBENT: with a handful of pairs, equal accuracy is
     noise, and swapping checkpoints on noise makes the lineage meaningless.
+
+    Monotonicity is checked whenever `cand_net` is supplied and is NOT
+    optional: accuracy alone accepted the first deployed checkpoint at 0.83
+    on held-out pairs, and it still lost end-to-end because most of those
+    pairs compared two failures rather than a real pass vs. fail.
     """
     f, m = [], {"candidate_accuracy": cand_acc,
                 "accepted_accuracy": accepted_acc, "eval_pairs": n_eval}
@@ -48,6 +90,12 @@ def ranker_gate(cand_acc: float | None, accepted_acc: float | None,
         f.append("candidate_not_evaluable")
     elif accepted_acc is not None and cand_acc <= accepted_acc:
         f.append(f"accuracy_not_improved:{cand_acc}<={accepted_acc}")
+    if cand_net is not None:
+        mono = check_ranker_monotonicity(cand_net)
+        m["monotonicity"] = mono
+        if not mono["strictly_decreasing"]:
+            f.append("monotonicity_check_failed: score does not decrease "
+                     "with worst_predicted_violation")
     return GateResult("ranker", not f, f, m)
 
 

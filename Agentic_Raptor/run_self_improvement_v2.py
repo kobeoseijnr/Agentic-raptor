@@ -47,6 +47,7 @@ from agentic_raptor.selfimprove_v2 import (STREAMS, GenerationPaths,  # noqa: E4
 from agentic_raptor.selfimprove_v2.corpus import (aggregate_sft_targets,  # noqa: E402
                                                   build_corpus_v2)
 from agentic_raptor.selfimprove_v2.streams import append, read  # noqa: E402
+from agentic_raptor.ranking.model import PostSACRanker            # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -74,17 +75,42 @@ def sha(path) -> str | None:
 
 
 # --------------------------------------------------------------------------
+def _ranker_pair_informative(p: dict) -> bool:
+    """One design passed, the other failed -- a real preference exists.
+
+    22 of the first 27 trusted pairs compared two designs that BOTH failed,
+    where "winner" means only "failed less" via a noisier distance metric.
+    That mix, retrained down to a bare linear model, still learned a
+    POSITIVE weight on worst_violation. Ambiguous pairs are excluded from
+    fitting by default; see train_post_sac_ranker.py for the full account.
+    """
+    oa, ob = p.get("outcome_A") or {}, p.get("outcome_B") or {}
+    return bool(oa.get("exact_spec_pass")) != bool(ob.get("exact_spec_pass"))
+
+
 def train_ranker_candidate(pairs: list, out: Path, epochs=200, lr=1e-2,
-                           seed=0):
-    """Fit a candidate ranker on measured pairs. Returns (path, n) or None."""
+                           seed=0, include_ambiguous=False,
+                           ambiguous_weight=0.2, weight_decay=0.1):
+    """Fit a candidate ranker on measured pairs. Returns (path, n, report)."""
     import torch
 
     from agentic_raptor.ranking.model import PostSACRanker, features
     from agentic_raptor.ranking.types import SurrogatePrediction
+    from agentic_raptor.selfimprove_v2.gates import check_ranker_monotonicity
     usable = [p for p in pairs if p.get("winner") and p.get("prediction_A")
               and p.get("prediction_B")]
-    if len(usable) < 2:
-        return None, len(usable)
+    informative = [p for p in usable if _ranker_pair_informative(p)]
+    ambiguous = [p for p in usable if not _ranker_pair_informative(p)]
+    fit = list(informative)
+    weights = [1.0] * len(informative)
+    if include_ambiguous:
+        fit += ambiguous
+        weights += [ambiguous_weight] * len(ambiguous)
+    rep = {"usable": len(usable), "informative": len(informative),
+          "ambiguous": len(ambiguous), "fit_on": len(fit),
+          "include_ambiguous": include_ambiguous}
+    if len(fit) < 2:
+        return None, len(fit), rep
 
     def pred(d):
         keep = {k: v for k, v in (d or {}).items()
@@ -94,25 +120,42 @@ def train_ranker_candidate(pairs: list, out: Path, epochs=200, lr=1e-2,
         keep.setdefault("sizing_manifest_hash", "x")
         return SurrogatePrediction(**keep)
 
-    xw, xl = [], []
-    for p in usable:
+    xw, xl, ws = [], [], []
+    for p, w in zip(fit, weights):
         fa = features(p["spec"], pred(p["prediction_A"]))
         fb = features(p["spec"], pred(p["prediction_B"]))
         if p["winner"] == "A":
             xw.append(fa); xl.append(fb)
         else:
             xw.append(fb); xl.append(fa)
+        ws.append(w)
     torch.manual_seed(seed)
     net = PostSACRanker.build()
-    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    # weight_decay is not cosmetic: with a few dozen informative pairs, an
+    # unregularised 32-hidden-unit net can hit 100% train accuracy while
+    # still failing the monotonicity check (memorised a locally-inverted
+    # shape). Measured directly on real pairs: wd=0.0 failed, wd=0.01-0.1
+    # passed at the SAME accuracy.
+    opt = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=weight_decay)
     tw = torch.tensor(xw, dtype=torch.float32)
     tl = torch.tensor(xl, dtype=torch.float32)
+    tws = torch.tensor(ws, dtype=torch.float32)
     for _ in range(epochs):
-        loss = -torch.nn.functional.logsigmoid(net(tw) - net(tl)).mean()
+        per = -torch.nn.functional.logsigmoid(net(tw) - net(tl)).squeeze(-1)
+        loss = (per * tws).sum() / tws.sum()
         opt.zero_grad(); loss.backward(); opt.step()
+
+    mono = check_ranker_monotonicity(net)
+    rep["monotonicity"] = mono
+    if not mono["strictly_decreasing"]:
+        # do NOT save: a checkpoint that scores worse designs higher must
+        # never reach the gate as a candidate, let alone be accepted
+        rep["rejected_because"] = "monotonicity_check_failed"
+        return None, len(fit), rep
+
     out.parent.mkdir(parents=True, exist_ok=True)
     torch.save(net.state_dict(), out)
-    return out, len(usable)
+    return out, len(fit), rep
 
 
 def eval_ranker(ckpt, pairs: list) -> float | None:
@@ -272,6 +315,92 @@ def eval_puct(ckpt, rows: list):
 
 
 # --------------------------------------------------------------------------
+# Proposer (SFT/LLM) retrain + gate -- WIRED (2026-08-11). Previously this
+# loop only ever COLLECTED evidence (sft_queue -> aggregate_sft_targets ->
+# corpus_v2.json) and stopped, with a comment saying "proposer retraining
+# is a GPU step run separately." proposer_gates was imported and never
+# called; --eval-specs was declared and never read; --freeze-proposer
+# defaulted to True with action="store_true", which gave the CLI no way to
+# ever set it False. All three fixed below: a real candidate gets trained
+# on corpus_v2.json (agentic_raptor.llm_dpo.stage3e4.run_sft, the same
+# function train_proposer_diverse.py uses), evaluated on specs held out
+# from this generation's own harvest range with proposer_gates' exact
+# required metrics (see eval_proposer()'s docstring for why this is NOT
+# the paper's frozen eval_sets.py set), and accepted or rolled back
+# exactly like the ranker/PUCT candidates above -- same pattern, not a
+# new one.
+def train_proposer_candidate(corpus_path: Path, out_dir: Path, steps: int,
+                             seed: int = 0) -> dict:
+    """Real LoRA fine-tune on corpus_v2.json. Returns run_sft()'s own
+    record (steps, loss curve, checkpoint path, wall-clock) -- GPU, real
+    cost, same order of magnitude as train_proposer_diverse.py documents
+    (roughly 2-3h at the default step count)."""
+    from agentic_raptor.llm_dpo.stage3e4 import run_sft
+    return run_sft(steps=steps, seed=seed, corpus_path=corpus_path, out_dir=out_dir)
+
+
+def eval_proposer(adapter: str | None, eval_idxs: list, *, split: str,
+                  ranker_ckpt, value_ckpt, rag_memory, budget: int,
+                  target_k: int = 5, seed: int = 0) -> dict:
+    """The exact 6 metrics agentic_raptor.selfimprove_v2.gates.
+    proposer_gates() requires, computed on spec indices held out from THIS
+    generation's own harvest range (never the range training/multi_seed
+    came from). NOTE: this is a different, narrower notion of "held out"
+    than agentic_raptor.publication.eval_sets' frozen seed-11/23/47 set --
+    it still operates entirely on split="train", matching how the rest of
+    this self-improvement loop already works, not the paper's frozen
+    evaluation specs.
+
+    Runs the FULL real pipeline (learning_mode="frozen", so evaluation can
+    never itself leak into training/harvest streams) for every eval spec,
+    with THIS adapter loaded. structural_validity_rate / mean_distinct_
+    graphs / duplicate_rate / success_at_k come from the real proposer
+    output (stage3_propose); final_pass_rate / measured_selected_quality
+    come from the real authoritative SPICE verification (stage9/nominal/
+    fom) -- genuinely SPICE-costly, which is exactly why this only runs
+    once enough evidence has accumulated to justify attempting a retrain.
+    """
+    import run_raptor_v2 as v2
+    from run_qwen_ablation import _load
+    tok, model = _load(adapter)
+    attempts = valid = dup = passes = 0
+    distinct_per_spec, fom_values = [], []
+    for idx in eval_idxs:
+        tr = v2.run_pipeline(
+            model, tok, str(adapter) if adapter else "", split=split,
+            spec_index=idx, budget=budget, seed=seed,
+            ranker_ckpt=ranker_ckpt, value_ckpt=value_ckpt,
+            rag_memory=rag_memory, learning_mode="frozen",
+            out_prefix="PROPGATE", use_llm=True)
+        prop = tr.get("stage3_propose") or {}
+        attempts += prop.get("attempts") or 0
+        distinct = prop.get("distinct") or 0
+        valid += distinct
+        distinct_per_spec.append(distinct)
+        hashes = prop.get("canonical_graph_hashes") or []
+        dup += max(0, len(hashes) - len(set(hashes)))
+        nom = tr.get("nominal") or {}
+        if nom.get("complete_pass"):
+            passes += 1
+            fv = (tr.get("fom") or {}).get("fom_value")
+            if fv is not None:
+                fom_values.append(fv)
+    n = max(1, len(eval_idxs))
+    return {
+        "structural_validity_rate": valid / max(1, attempts),
+        "mean_distinct_graphs": sum(distinct_per_spec) / n,
+        "duplicate_rate": dup / max(1, valid + dup),
+        "success_at_k": valid / (n * target_k),
+        "final_pass_rate": passes / n,
+        # mean FoM among PASSING designs only -- feasibility is primary,
+        # FoM is only meaningful conditioned on it (Part: FoM discipline
+        # used throughout this project's diagnostics)
+        "measured_selected_quality": (
+            sum(fom_values) / len(fom_values) if fom_values else None),
+        "n_eval_specs": len(eval_idxs), "n_passing": passes}
+
+
+# --------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--generations", type=int, default=2)
@@ -282,16 +411,43 @@ def main():
     ap.add_argument("--budget", type=int, default=12)
     ap.add_argument("--eval-specs", type=int, default=2,
                     help="frozen held-out specs for the proposer gate")
-    ap.add_argument("--min-ranker-pairs", type=int, default=16,
-                    help="accumulate at least this many measured pairs before "
-                         "fitting a ranker; a net fitted to a handful of "
-                         "examples is noise wearing a checkpoint's name")
+    ap.add_argument("--min-ranker-pairs", type=int, default=8,
+                    help="accumulate at least this many INFORMATIVE pairs "
+                         "(one design passed, the other failed) before "
+                         "fitting a ranker. Ambiguous pairs (both same "
+                         "outcome) do not count: they are the majority of "
+                         "what --calibrate collects and are what produced "
+                         "the first inverted checkpoint")
+    ap.add_argument("--include-ambiguous-ranker-pairs", action="store_true",
+                    help="also fit on ambiguous pairs, at reduced weight, "
+                         "when informative ones are scarce")
     ap.add_argument("--min-puct-examples", type=int, default=16,
                     help="same policy for the policy/value net")
-    ap.add_argument("--freeze-proposer", action="store_true", default=True,
-                    help="collect SFT/DPO evidence but do NOT retrain the "
-                         "proposer (default). Evidence is provisional until "
-                         "enough equal-budget multi-seed results exist.")
+    # 2026-08-11 fix: this was `action="store_true", default=True` -- a
+    # flag that already defaults True can never be SET False from the
+    # command line (passing it is a no-op; there was no negative form).
+    # The proposer was frozen unconditionally, with no way to unfreeze it
+    # short of editing this file. --unfreeze-proposer is the real toggle;
+    # --freeze-proposer is kept, redundant-but-harmless, for old callers.
+    ap.add_argument("--freeze-proposer", dest="freeze_proposer",
+                    action="store_true", default=True,
+                    help="(default) collect SFT/DPO evidence but do NOT "
+                         "retrain the proposer. Evidence is provisional "
+                         "until enough equal-budget multi-seed results "
+                         "exist.")
+    ap.add_argument("--unfreeze-proposer", dest="freeze_proposer",
+                    action="store_false",
+                    help="allow a real proposer retrain once "
+                         "--sft-threshold multi-seed targets have "
+                         "accumulated -- trains a real LoRA candidate "
+                         "(GPU, ~2-3h), evaluates it on --eval-specs specs "
+                         "held out from this run's own harvest range, and "
+                         "accepts it ONLY if proposer_gates passes; "
+                         "otherwise rolls back and keeps the current "
+                         "adapter.")
+    ap.add_argument("--proposer-train-steps", type=int, default=1200,
+                    help="LoRA steps for a proposer retrain attempt -- "
+                         "same default as train_proposer_diverse.py")
     ap.add_argument("--sft-min-seeds", type=int, default=2,
                     help="distinct seeds required before a measured topology "
                          "may become an SFT target")
@@ -408,18 +564,26 @@ def main():
         # hold out the newest generation's pairs from fitting
         held = read(gp.stream("ranker_pairs"))
         fit = [p for p in all_pairs if p not in held] or all_pairs
-        if len(fit) < args.min_ranker_pairs:
-            cand_ck, n_fit = None, len(fit)
-            print(f"  ranker       : SKIP retrain -- {len(fit)} pairs < "
-                  f"{args.min_ranker_pairs} (accumulating)", flush=True)
+        n_informative = sum(1 for p in fit if _ranker_pair_informative(p))
+        if n_informative < args.min_ranker_pairs:
+            cand_ck, n_fit, train_rep = None, len(fit), {}
+            print(f"  ranker       : SKIP retrain -- {n_informative} "
+                  f"informative pairs < {args.min_ranker_pairs} "
+                  f"({len(fit)} total, accumulating)", flush=True)
         else:
-            cand_ck, n_fit = train_ranker_candidate(
-                fit, gp.ckpt / "ranker_candidate.pt")
+            cand_ck, n_fit, train_rep = train_ranker_candidate(
+                fit, gp.ckpt / "ranker_candidate.pt",
+                include_ambiguous=args.include_ambiguous_ranker_pairs)
+            if cand_ck is None and train_rep.get("rejected_because"):
+                print(f"  ranker       : candidate REJECTED at training time"
+                      f" -- {train_rep['rejected_because']}", flush=True)
+        cand_net = (PostSACRanker.load(cand_ck).model if cand_ck else None)
         r_cand = eval_ranker(cand_ck, held) if cand_ck else None
         r_acc = eval_ranker(acc["ranker_ckpt"], held)
-        rg = ranker_gate(r_cand, r_acc, len(held))
+        rg = ranker_gate(r_cand, r_acc, len(held), cand_net=cand_net)
         gen["gates"]["ranker"] = rg.as_dict()
         gen["gates"]["ranker"]["metrics"]["fit_pairs"] = n_fit
+        gen["gates"]["ranker"]["metrics"]["training"] = train_rep
         if rg.passed and cand_ck:
             final = gp.ckpt / "ranker.pt"
             final.write_bytes(Path(cand_ck).read_bytes())
@@ -429,6 +593,31 @@ def main():
               f"cand={r_cand} accepted={r_acc} {rg.failures}", flush=True)
 
         # ---------------- 3. RETRAIN + 4. GATE: PUCT ---------------------
+        # KNOWN GAP (2026-08-11, root-level PUCT retirement /
+        # TRUE_ALPHAZERO cutover -- see run_raptor_v2.py and
+        # agentic_raptor.topology_rl.alphazero): this block still trains
+        # against puct_examples.jsonl's OLD schema (candidate -> scalar
+        # value_target only, no real MCTS visit distribution pi from
+        # genuine multi-step self-play). Its accepted checkpoint
+        # (acc["value_ckpt"]) is passed to run_pipeline(..., value_ckpt=
+        # acc["value_ckpt"]) below, which now flows into alphazero_
+        # select_two()'s value_ckpt -- meaning a checkpoint from THIS loop
+        # CAN be loaded as an AlphaZero value net (the network architecture
+        # is compatible; s1.build_policy_value/save_checkpoint are shared
+        # infrastructure). It must never be treated as a genuine trained
+        # AlphaZero generation, though: it never learns from a real
+        # (state, pi, z) episode, only isolated value regression, so its
+        # policy head is never actually updated toward real MCTS visit
+        # distributions. This loop's output must NEVER be assigned
+        # checkpoint_status="PROMOTED" (or even "CANDIDATE") in
+        # agentic_raptor.topology_rl.alphazero's generation manifests --
+        # only a real AZ_G0->AZ_Gk campaign (agentic_raptor.topology_rl.
+        # alphazero.train_az_generation, real episodes) may produce those.
+        # Migrating this block to real AlphaZero episode collection +
+        # training is real, separate future work -- out of scope for the
+        # cutover itself, and explicitly not attempted here since "do not
+        # run A9 now" / "do not implement the complete A9 orchestrator"
+        # applies equally to this adaptive-lineage retrain path.
         all_px = []
         for gg in range(0, g + 1):
             all_px += read(GenerationPaths(SI, gg).stream("puct_examples"))
@@ -488,6 +677,22 @@ def main():
                 f"enough equal-budget multi-seed results exist.")
         elif len(multi_seed) >= args.sft_threshold:
             base = json.loads(Path(acc["corpus"]).read_text(encoding="utf-8"))
+            # 2026-08-11 fix: every record in BASE_CORPUS (corpus_diverse.
+            # json) has a "### KNOWN ..." line baked in at build time from
+            # datasets/simulation_memory/self_improvement_runs.jsonl
+            # (archived -- pre-VCM-fix AND pre-C_LOAD-fix; see
+            # agentic_raptor.selfimprove_v2.sft_self_improvement's module
+            # docstring, verified directly: 765/765 records). Passing that
+            # prompt straight through -- both as the template half AND as
+            # the base for every new measured-target prompt below -- was
+            # silently carrying stale pre-fix evidence into every retrain
+            # this branch ever ran. Stripped here the same way the A9 SFT
+            # self-improvement pathway strips it (same regex).
+            from agentic_raptor.selfimprove_v2.sft_self_improvement import \
+                strip_known_line
+            base = dict(base, records=[
+                {**r, "prompt": strip_known_line(r.get("prompt") or "")}
+                for r in base.get("records", [])])
             prompts = {r["context_id"]: r["prompt"]
                        for r in base.get("records", [])}
             newc = build_corpus_v2(base, multi_seed,
@@ -498,9 +703,52 @@ def main():
             gen["sft"]["corpus_written"] = str(cpath)
             gen["sft"]["corpus_counts"] = newc["counts"]
             gen["sft"]["retrain_required"] = True
-            gen["sft"]["note"] = ("corpus built; proposer retraining is a GPU "
-                                  "step run separately, then gated by "
-                                  "proposer_gates before acceptance")
+
+            # ---- REAL train -> eval -> gate -> accept/rollback ----------
+            # Same pattern as the ranker/PUCT blocks above: fit a
+            # candidate, evaluate it and the incumbent on IDENTICAL specs
+            # held out from this generation's own harvest range
+            # (args.eval_specs -- declared for this exact purpose since
+            # this file's first version, never read until now), and accept
+            # only if proposer_gates passes. This is the step that used to
+            # stop at "corpus built."
+            adapter_out = gp.ckpt / "proposer_candidate"
+            train_rec = train_proposer_candidate(
+                cpath, adapter_out, steps=args.proposer_train_steps, seed=seed)
+            gen["sft"]["candidate_training"] = train_rec
+
+            eval_idxs = [args.start + i * args.step
+                        for i in range(args.specs, args.specs + args.eval_specs)]
+            common_eval_kw = dict(
+                eval_idxs=eval_idxs, split="train",
+                ranker_ckpt=acc["ranker_ckpt"], value_ckpt=acc["value_ckpt"],
+                rag_memory=acc["rag_memory"], budget=args.budget)
+            cand_metrics = eval_proposer(str(adapter_out), **common_eval_kw)
+            acc_metrics = eval_proposer(acc["proposer_adapter"], **common_eval_kw)
+            pgr = proposer_gates(cand_metrics, acc_metrics)
+            gen["gates"]["proposer"] = pgr.as_dict()
+
+            if pgr.passed:
+                final = gp.ckpt / "proposer_adapter"
+                import shutil
+                if final.exists():
+                    shutil.rmtree(final)
+                shutil.copytree(adapter_out, final)
+                acc["proposer_adapter"] = str(final)
+                gen["accepted_changes"].append("proposer")
+                gen["sft"]["note"] = (
+                    f"PROPOSER RETRAINED AND ACCEPTED: {len(multi_seed)} "
+                    f"multi-seed targets, proposer_gates passed "
+                    f"({cand_metrics['n_passing']}/{cand_metrics['n_eval_specs']} "
+                    f"eval passes vs incumbent's "
+                    f"{acc_metrics['n_passing']}/{acc_metrics['n_eval_specs']})")
+            else:
+                gen["sft"]["note"] = (
+                    f"proposer candidate REJECTED: proposer_gates failed "
+                    f"({pgr.failures}) -- keeping incumbent adapter "
+                    f"{acc['proposer_adapter']}")
+            print(f"  proposer gate: {'PASS' if pgr.passed else 'ROLLBACK'} "
+                 f"{pgr.failures}", flush=True)
         else:
             gen["sft"]["retrain_required"] = False
             gen["sft"]["note"] = (

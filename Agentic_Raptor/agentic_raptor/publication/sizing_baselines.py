@@ -74,13 +74,17 @@ def _summ(results, spec, t0):
             "runtime_s": round(time.time() - t0, 1)}
 
 
-def _sample_loop(tid, g, spec, exe, out, costs, budget, seed, sampler):
+def _sample_loop(tid, g, spec, exe, out, costs, budget, seed, sampler,
+                 c_load_f: float | None = None):
     """Shared loop for stateless samplers; nominal point measured first."""
+    from agentic_raptor.electrical import effective_c_load
+    cl = effective_c_load(spec, override=c_load_f)
     rng = Random(seed)
     results = []
     for step in range(budget):
         knobs = [1.0] * N_KNOBS if step == 0 else sampler(rng, results, step)
-        m = measure(tid, apply_knobs(g, knobs), exe, out, f"s{step}", costs)
+        m = measure(tid, apply_knobs(g, knobs), exe, out, f"s{step}", costs,
+                    c_load_f=cl)
         r, _mv = spec_reward(m, spec)
         results.append({**m, "reward": float(r),
                         "knobs": dict(zip(KNOB_NAMES,
@@ -115,6 +119,9 @@ def _tpe(rng, results, step):
 def _sac_minimal(tid, g, spec, exe, out, costs, budget, seed):
     """C4: actor+critics only — no surrogate, no ranker, no refinement."""
     import torch
+
+    from agentic_raptor.electrical import effective_c_load
+    cl = effective_c_load(spec)
     torch.manual_seed(seed)
     actor = torch.nn.Sequential(torch.nn.Linear(5, 48), torch.nn.ReLU(),
                                 torch.nn.Linear(48, 2 * N_KNOBS))
@@ -138,7 +145,7 @@ def _sac_minimal(tid, g, spec, exe, out, costs, budget, seed):
             a = torch.tanh(mu + ls.exp() * torch.randn(N_KNOBS))
             knobs = (lo + (a + 1) / 2 * (hi - lo)).detach()
         m = measure(tid, apply_knobs(g, [float(x) for x in knobs]), exe, out,
-                    f"c4_{step}", costs)
+                    f"c4_{step}", costs, c_load_f=cl)
         r, _mv = spec_reward(m, spec)
         results.append({**m, "reward": float(r),
                         "knobs": dict(zip(KNOB_NAMES,
@@ -160,6 +167,8 @@ LEGACY_HI = [2.0, 1.0, 6.0]
 
 def _legacy(tid, g, spec, exe, out, costs, budget, seed):
     """C8: width-only action space + raw-metric legacy reward."""
+    from agentic_raptor.electrical import effective_c_load
+    cl = effective_c_load(spec)
     rng = Random(seed)
     results = []
     for step in range(budget):
@@ -167,7 +176,8 @@ def _legacy(tid, g, spec, exe, out, costs, budget, seed):
              [lo + rng.random() * (hi - lo)
               for lo, hi in zip(LEGACY_LO, LEGACY_HI)])
         knobs = [v[0], v[1], 1.0, 1.0, v[2], 1.0]   # no L, no bias control
-        m = measure(tid, apply_knobs(g, knobs), exe, out, f"c8_{step}", costs)
+        m = measure(tid, apply_knobs(g, knobs), exe, out, f"c8_{step}", costs,
+                    c_load_f=cl)
         results.append({**m, "reward": float(legacy_reward(m, spec)),
                         "knobs": dict(zip(KNOB_NAMES,
                                           [round(k, 3) for k in knobs]))})
@@ -226,7 +236,9 @@ def run_baselines(task_ids: list | None = None, budget: int = 16,
             t0 = time.time()
             costs = new_costs()
             if method == "C0":
-                m = measure(tid, g, exe, out, "c0", costs)
+                from agentic_raptor.electrical import effective_c_load
+                m = measure(tid, g, exe, out, "c0", costs,
+                           c_load_f=effective_c_load(spec))
                 r, _ = spec_reward(m, spec)
                 results = [{**m, "reward": float(r),
                             "knobs": dict(zip(KNOB_NAMES, [1.0] * N_KNOBS))}]
