@@ -194,7 +194,9 @@ def test_production_call_sites_use_persist_false():
     import inspect
 
     import run_raptor_v2 as v2
-    src = inspect.getsource(v2.size_and_predict)
+    # 2026-08-16 agentic refactor: the sizing call lives in the
+    # extracted single-branch worker; the invariant is unchanged
+    src = inspect.getsource(v2._size_one_branch)
     assert "persist=False" in src
 
 
@@ -232,13 +234,31 @@ def test_campaign_status_distinguishes_partial_from_full_pass():
 
 
 # --------------------- item 14: compatibility gate still correct ---------------
-def test_compatibility_gate_still_fails_pre_campaign():
+# This test originally pinned the gate to FAIL, documenting the expected
+# state at that point in the mid-rebuild audit ("before the campaign has
+# even run"). Two things have since legitimately changed, not weakened:
+# (1) real campaigns since then populated trusted_pairs/rag_memory_v2_clean/
+# sac_sizing_memory_dir with genuine POST_CLOAD_FIX_V1 data; (2) Stage 8
+# (2026-08-12) found CLOAD_GATED_ARTIFACTS was gating on FOUR components a
+# live FULL run never actually reads -- two retired-and-deliberately-absent
+# root-PUCT checkpoint entries, the now-removed learned DPO ranker, and an
+# offline-corpus-construction-only artifact -- a real stale-logic bug, not a
+# case for weakening the check. See preflight.CLOAD_GATED_ARTIFACTS's
+# docstring for the full root-cause writeup.
+def test_compatibility_gate_now_passes_on_the_four_live_artifacts():
+    # Stage 8 (2026-08-12): dpo_ranker_v2 joined the gate set when the
+    # re-justified Stage 7.2B checkpoint was deployed back into FULL's
+    # default selector -- it is now genuinely loaded by every live FULL
+    # run, same as the other three.
     from agentic_raptor.publication.preflight import (
-        check_electrical_environment_compatibility)
+        CLOAD_GATED_ARTIFACTS, check_electrical_environment_compatibility)
+    assert set(CLOAD_GATED_ARTIFACTS) == {
+        "trusted_pairs", "rag_memory_v2_clean", "sac_sizing_memory_dir",
+        "dpo_ranker_v2"}
     result = check_electrical_environment_compatibility()
-    assert result["ok"] is False, (
-        "compatibility gate reports READY before the campaign has even run -- "
-        "this should still be failing at this point in the rebuild")
+    assert result["ok"] is True, (
+        f"expected the four genuinely-live-relevant artifacts to all be "
+        f"POST_CLOAD_FIX_V1 by now: {result['detail']}")
 
 
 # ------------------ finding 5 (post-launch, 2026-08-10): LOG versioning --------

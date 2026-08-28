@@ -34,6 +34,24 @@ PRIORS = {
     "load_pmos": {"w": 60.0, "l": 0.5, "origin": "analoggym_load_prior", "conf": 0.7},
     "bias_nmos": {"w": 20.0, "l": 1.0, "origin": "generated_support_bias_prior", "conf": 0.6},
     "miller_cap_f": {"value": 2e-12, "origin": "conservative_sky130_default", "conf": 0.6},
+    #: nulling resistor for RC-type compensation: ~1/gm2 territory; sized live
+    #: by the rz_x knob (spec_sizing.apply_knobs clamps to [RZ_MIN, RZ_MAX])
+    "rz_ohm": {"value": 2000.0, "origin": "conservative_sky130_default", "conf": 0.5},
+    #: TIER-2 VOCABULARY (2026-08-17): cascode devices sit in series with the
+    #: input pair / mirror -- same width class as what they stack on; the
+    #: class-AB output pair is sized like the CS stage it replaces.
+    "cascode_nmos": {"w": 10.0, "l": 0.5, "origin": "analoggym_input_pair_prior", "conf": 0.6},
+    "cascode_pmos": {"w": 20.0, "l": 0.5, "origin": "analoggym_mirror_prior", "conf": 0.6},
+    "ab_nmos": {"w": 40.0, "l": 0.5, "origin": "analoggym_second_stage_prior", "conf": 0.6},
+    "ab_pmos": {"w": 60.0, "l": 0.5, "origin": "analoggym_load_prior", "conf": 0.6},
+    #: FOLDED-CASCODE OTA (2026-08-18, SECOND CIRCUIT TYPE): PMOS input pair,
+    #: NMOS folding legs + cascodes, PMOS top current sources, NMOS cascode
+    #: mirror load. Widths from the AnalogGym FC prior class.
+    "fc_input_pmos": {"w": 20.0, "l": 0.5, "origin": "analoggym_fc_input_prior", "conf": 0.6},
+    "fc_tail_pmos": {"w": 40.0, "l": 1.0, "origin": "analoggym_fc_tail_prior", "conf": 0.6},
+    "fc_fold_nmos": {"w": 60.0, "l": 0.5, "origin": "analoggym_fc_fold_prior", "conf": 0.6},
+    "fc_cas_nmos": {"w": 30.0, "l": 0.5, "origin": "analoggym_fc_cascode_prior", "conf": 0.6},
+    "fc_top_pmos": {"w": 120.0, "l": 0.5, "origin": "analoggym_fc_source_prior", "conf": 0.6},
     "ibias_a": {"value": 20e-6, "origin": "analoggym_bias_current_prior", "conf": 0.7},
 }
 
@@ -87,15 +105,154 @@ def audit_generated(registry: TopologyRegistry) -> list[dict[str, Any]]:
     return rows
 
 
+def map_folded_cascode(entry, audit_row: dict[str, Any]) -> tuple[DeviceCircuitGraph, str]:
+    """SECOND CIRCUIT TYPE (2026-08-18): single-stage FOLDED-CASCODE OTA.
+
+    NMOS-INPUT form, chosen for the testbench: the AnalogGym harness biases
+    the amplifier in unity feedback at DC with VCM = 0.25*VDD = 0.45 V, so
+    the output DC sits at 0.45 V. A PMOS-input FC puts the output on top of
+    an NMOS cascode stack that needs ~0.7 V of headroom -> op-point fails
+    (measured: op_valid=0 at nominal). NMOS input + PMOS cascode load puts
+    the output UNDER a PMOS stack from 1.8 V, which is comfortable at 0.45 V.
+
+      * NMOS differential pair M1/M2, tail M0 (gate nb1) -- the pair drains
+        FOLD up into nodes nf1/nf2;
+      * top: PMOS current sources M5/M6 (gate = nt1, wide-swing mirror) with
+        PMOS cascodes M7/M8 (gate pb2): the CASCODED PMOS MIRROR LOAD
+        (M7 side is the diode reference at nt1; output at M8's drain);
+      * bottom: NMOS current sinks M3/M4 (gate nb1) + NMOS cascodes M9/M10
+        (gate nb2) feed the two legs.
+    Fully cascoded top and bottom: Rout ~ gm*ro^2 || gm*ro^2, one dominant
+    pole at the load, no Miller path. Same DeviceRecord/emit/apply_knobs
+    path; roles land in S1_ROLES so the existing knobs size it."""
+    cid = f"map-{uuid.uuid4().hex[:8]}"
+    g = DeviceCircuitGraph(entry.topology_id, cid, 1,
+                           ports={"gnda": "gnda", "vdda": "vdda", "vinn": "vinn",
+                                  "vinp": "vinp", "vout": "vout"})
+    ev = {"rule": "folded_cascode_template", "audit": audit_row["mapping_readiness"],
+          "circuit_type": "folded_cascode_ota"}
+    P = PRIORS
+    g.devices += [
+        # ---- bias tree: nb1 (NMOS diode), nb2 (stacked NMOS diode), pb2 (PMOS
+        #      cascode gate = PMOS diode fed by nb1 sink)
+        DeviceRecord("IB1", "isrc", "bias_device", {"p": "vdda", "n": "nb1"}, "bias1",
+                     {"value": P["ibias_a"]["value"], "origin": P["ibias_a"]["origin"]},
+                     {"generated_support_bias": True, **ev}),
+        DeviceRecord("MB1", "nmos", "bias_device",
+                     {"d": "nb1", "g": "nb1", "s": "gnda", "b": "gnda"},
+                     "bias1", dict(P["bias_nmos"]), {"generated_support_bias": True, **ev}),
+        DeviceRecord("IB2", "isrc", "bias_device", {"p": "vdda", "n": "nb2"}, "bias2",
+                     {"value": P["ibias_a"]["value"], "origin": P["ibias_a"]["origin"]},
+                     {"generated_support_bias": True, **ev}),
+        DeviceRecord("MB2", "nmos", "bias_device",
+                     {"d": "nb2", "g": "nb2", "s": "nb2s", "b": "gnda"},
+                     "bias2", dict(P["bias_nmos"]), {"generated_support_bias": True, **ev}),
+        DeviceRecord("MB3", "nmos", "bias_device",
+                     {"d": "nb2s", "g": "nb1", "s": "gnda", "b": "gnda"},
+                     "bias2", dict(P["bias_nmos"]), {"generated_support_bias": True, **ev}),
+        DeviceRecord("MB4", "pmos", "bias_device",
+                     {"d": "pb2", "g": "pb2", "s": "pb2s", "b": "vdda"},
+                     "bias3", dict(P["fc_top_pmos"]), {"generated_support_bias": True, **ev}),
+        DeviceRecord("MB5", "pmos", "bias_device",
+                     {"d": "pb2s", "g": "pb2", "s": "vdda", "b": "vdda"},
+                     "bias3", dict(P["fc_top_pmos"]), {"generated_support_bias": True, **ev}),
+        DeviceRecord("MB6", "nmos", "bias_device",
+                     {"d": "pb2", "g": "nb1", "s": "gnda", "b": "gnda"},
+                     "bias3", dict(P["bias_nmos"]), {"generated_support_bias": True, **ev}),
+        # ---- signal path: NMOS pair + tail
+        DeviceRecord("M0", "nmos", "tail_current_source",
+                     {"d": "ntail", "g": "nb1", "s": "gnda", "b": "gnda"},
+                     "tail1", dict(P["tail_nmos"]), ev),
+        DeviceRecord("M1", "nmos", "input_pair_nmos",
+                     {"d": "nf1", "g": "vinp", "s": "ntail", "b": "gnda"},
+                     "pair1", dict(P["input_pair_nmos"]), ev),
+        DeviceRecord("M2", "nmos", "input_pair_nmos",
+                     {"d": "nf2", "g": "vinn", "s": "ntail", "b": "gnda"},
+                     "pair1", dict(P["input_pair_nmos"]), ev),
+        # bottom sinks + NMOS cascodes (feed the fold nodes)
+        DeviceRecord("M3", "nmos", "tail_current_source",
+                     {"d": "nc1", "g": "nb1", "s": "gnda", "b": "gnda"},
+                     "sink1", dict(P["fc_fold_nmos"]), ev),
+        DeviceRecord("M4", "nmos", "tail_current_source",
+                     {"d": "nc2", "g": "nb1", "s": "gnda", "b": "gnda"},
+                     "sink1", dict(P["fc_fold_nmos"]), ev),
+        DeviceRecord("M9", "nmos", "tail_current_source",
+                     {"d": "nf1", "g": "nb2", "s": "nc1", "b": "gnda"},
+                     "cas0", dict(P["fc_cas_nmos"]), ev),
+        DeviceRecord("M10", "nmos", "tail_current_source",
+                     {"d": "nf2", "g": "nb2", "s": "nc2", "b": "gnda"},
+                     "cas0", dict(P["fc_cas_nmos"]), ev),
+        # top PMOS wide-swing cascoded mirror = LOAD; output at M8 drain
+        DeviceRecord("M5", "pmos", "mirror_reference",
+                     {"d": "pt1", "g": "nt1", "s": "vdda", "b": "vdda"},
+                     "mir1", dict(P["fc_top_pmos"]), ev),
+        DeviceRecord("M6", "pmos", "mirror_output",
+                     {"d": "pt2", "g": "nt1", "s": "vdda", "b": "vdda"},
+                     "mir1", dict(P["fc_top_pmos"]), ev),
+        DeviceRecord("M7", "pmos", "mirror_reference",
+                     {"d": "nt1", "g": "pb2", "s": "pt1", "b": "vdda"},
+                     "cas1", dict(P["fc_top_pmos"]), ev),
+        DeviceRecord("M8", "pmos", "mirror_output",
+                     {"d": "vout", "g": "pb2", "s": "pt2", "b": "vdda"},
+                     "cas1", dict(P["fc_top_pmos"]), ev),
+    ]
+    # the fold: pair drains nf1/nf2 ARE the sources of the top cascodes'
+    # legs -- connect: M7 (cascode) source pt1 fed by M5; its DRAIN nt1 must
+    # join the fold node nf1 (mirror side) and M8's drain vout joins nf2's
+    # path. Rewire the top cascodes' drains to the fold nodes.
+    for d in g.devices:
+        if d.device_id == "M7":
+            d.nets["d"] = "nf1"          # mirror reference node == fold node 1
+        elif d.device_id == "M8":
+            d.nets["d"] = "vout"         # output side: fold node 2 IS vout
+        elif d.device_id == "M10":
+            d.nets["d"] = "vout"         # bottom cascode on the output leg
+        elif d.device_id in ("M5", "M6"):
+            d.nets["g"] = "nf1"          # mirror gates from the fold/ref node
+    g.support_bias = ["IB1", "MB1", "IB2", "MB2", "MB3", "MB4", "MB5", "MB6"]
+    if "C" in audit_row.get("functional_blocks", []) or \
+            "RC_series" in audit_row.get("functional_blocks", []):
+        g.devices.append(DeviceRecord("CL1", "cap", "miller_compensation",
+                                      {"p": "vout", "n": "gnda"}, None,
+                                      {"value": P["miller_cap_f"]["value"],
+                                       "origin": P["miller_cap_f"]["origin"]},
+                                      {"compensation_topology": "load_cap_to_gnd", **ev}))
+    g.polarity = {"polarity_status": "template_defined", "stage_inversion_count": 1,
+                  "signal_path_evidence": "vinp->M1->nf1(mirror ref); vinn->M2->vout via M8/M10",
+                  "noninverting_input": "vinp", "selection_rule": "structural parity, NOT outcome-based"}
+    g.block_assignments = [{"block": "folded_cascode_input_stage",
+                            "devices": ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10"],
+                            "confidence": 0.7, "rule": "template", "evidence": ev}]
+    return g, "mapped"
+
+
 def map_family(entry, audit_row: dict[str, Any]) -> tuple[DeviceCircuitGraph | None, str]:
     """Template mapping: N-stage cascade (5T first stage, CS stages after),
     C blocks → Miller/load compensation, R+C → nulling branch. ff/fb gm branches
     are NOT silently realized: families keep partially_specified provenance and
     only the main path is mapped in this candidate (recorded in unresolved)."""
+    # SECOND CIRCUIT TYPE (2026-08-18): dispatch to the folded-cascode
+    # template when the audit row flags it. Additive -- every existing
+    # cascade family is byte-identical.
+    if audit_row.get("folded_cascode"):
+        return map_folded_cascode(entry, audit_row)
     n = max(1, audit_row["gain_stages"]) if audit_row["gain_stages"] else 0
     if n == 0:
         return None, "mapping_unsupported"
-    n = min(n, 3)
+    # TIER-2 VOCABULARY (2026-08-17): the cascade cap rises 3 -> 4 (nested
+    # per-stage nulling handles the extra pole), and two new structural
+    # blocks become realizable when the audit row flags them:
+    #   cascode_input : telescopic-cascode first stage -- extra gain from
+    #                   ro-boosting WITHOUT an extra pole (high gain at
+    #                   high UGBW, where more CS stages cost phase margin)
+    #   class_ab_out  : push-pull output stage -- drives heavy loads at low
+    #                   quiescent current (FoM at large C_load)
+    # Both are textbook sky130-realizable and flow through the SAME
+    # emit_netlist/apply_knobs path (cascode devices are stage-1 roles,
+    # AB devices stage-2 roles) -- no new sizing knobs are required.
+    n = min(n, 4)
+    cascode = bool(audit_row.get("cascode_input"))
+    class_ab = bool(audit_row.get("class_ab_output"))
     cid = f"map-{uuid.uuid4().hex[:8]}"
     g = DeviceCircuitGraph(entry.topology_id, cid, n,
                            ports={"gnda": "gnda", "vdda": "vdda", "vinn": "vinn",
@@ -128,18 +285,68 @@ def map_family(entry, audit_row: dict[str, Any]) -> tuple[DeviceCircuitGraph | N
                      {"generated_support_bias": True, **ev}),
     ]
     g.support_bias = ["M6", "IB1"]
+    if cascode:
+        # TELESCOPIC CASCODE: input pair drains feed NMOS cascodes (gate =
+        # nbias, the existing support bias net), whose drains meet PMOS
+        # cascodes under the mirror. Rewire: M1/M2 drains -> ncas1/ncas2;
+        # NMOS cascodes MC1/MC2 lift them to nmir/s1out; PMOS cascodes
+        # MC3/MC4 sit between the mirror devices and those nodes.
+        for d in g.devices:
+            if d.device_id == "M1":
+                d.nets["d"] = "ncas1"
+            elif d.device_id == "M2":
+                d.nets["d"] = "ncas2"
+            elif d.device_id == "M3":          # mirror ref drain -> via MC3
+                d.nets["d"] = "pcas1"
+            elif d.device_id == "M4":          # mirror out drain -> via MC4
+                d.nets["d"] = "pcas2"
+        g.devices += [
+            DeviceRecord("MC1", "nmos", "input_pair_nmos",
+                         {"d": "nmir", "g": "nbias", "s": "ncas1", "b": "gnda"},
+                         "cas1", dict(PRIORS["cascode_nmos"]),
+                         {"tier2_block": "cascode_input", **ev}),
+            DeviceRecord("MC2", "nmos", "input_pair_nmos",
+                         {"d": s1out, "g": "nbias", "s": "ncas2", "b": "gnda"},
+                         "cas1", dict(PRIORS["cascode_nmos"]),
+                         {"tier2_block": "cascode_input", **ev}),
+            DeviceRecord("MC3", "pmos", "mirror_reference",
+                         {"d": "nmir", "g": "nmir", "s": "pcas1", "b": "vdda"},
+                         "cas2", dict(PRIORS["cascode_pmos"]),
+                         {"tier2_block": "cascode_input", **ev}),
+            DeviceRecord("MC4", "pmos", "mirror_output",
+                         {"d": s1out, "g": "nmir", "s": "pcas2", "b": "vdda"},
+                         "cas2", dict(PRIORS["cascode_pmos"]),
+                         {"tier2_block": "cascode_input", **ev}),
+        ]
     prev = s1out
     inversions = 2  # vinp path: CS into mirror + mirror out (non-inverting to s1out)
     for k in range(2, n + 1):
         out = "vout" if k == n else f"n{k}"
-        g.devices += [
-            DeviceRecord(f"M{4 + 2 * k}", "nmos", "second_stage_gain_device",
-                         {"d": out, "g": prev, "s": "gnda", "b": "gnda"},
-                         f"cs{k}", dict(PRIORS["cs_gain_nmos"]), ev),
-            DeviceRecord(f"M{5 + 2 * k}", "pmos", "active_load",
-                         {"d": out, "g": "nmir", "s": "vdda", "b": "vdda"},
-                         f"cs{k}", dict(PRIORS["load_pmos"]), ev),
-        ]
+        if class_ab and k == n:
+            # CLASS-AB PUSH-PULL OUTPUT: NMOS driven by prev, PMOS driven by
+            # the mirror-side node of the previous stage (both signal-
+            # driven; quiescent set by the mirror bias) -- sources/sinks
+            # load current on demand instead of a fixed pull-up.
+            pdrive = "nmir" if k == 2 else f"n{k - 1}"
+            g.devices += [
+                DeviceRecord(f"M{4 + 2 * k}", "nmos", "second_stage_gain_device",
+                             {"d": out, "g": prev, "s": "gnda", "b": "gnda"},
+                             f"ab{k}", dict(PRIORS["ab_nmos"]),
+                             {"tier2_block": "class_ab_output", **ev}),
+                DeviceRecord(f"M{5 + 2 * k}", "pmos", "second_stage_gain_device",
+                             {"d": out, "g": pdrive, "s": "vdda", "b": "vdda"},
+                             f"ab{k}", dict(PRIORS["ab_pmos"]),
+                             {"tier2_block": "class_ab_output", **ev}),
+            ]
+        else:
+            g.devices += [
+                DeviceRecord(f"M{4 + 2 * k}", "nmos", "second_stage_gain_device",
+                             {"d": out, "g": prev, "s": "gnda", "b": "gnda"},
+                             f"cs{k}", dict(PRIORS["cs_gain_nmos"]), ev),
+                DeviceRecord(f"M{5 + 2 * k}", "pmos", "active_load",
+                             {"d": out, "g": "nmir", "s": "vdda", "b": "vdda"},
+                             f"cs{k}", dict(PRIORS["load_pmos"]), ev),
+            ]
         # Miller compensation across EACH inverting CS stage, locally.
         #
         # This placement is load-bearing, not incidental. A Miller capacitor
@@ -158,14 +365,47 @@ def map_family(entry, audit_row: dict[str, Any]) -> tuple[DeviceCircuitGraph | N
         # Textbook nested Miller assumes a stage-inversion pattern this
         # template does not have; do not reintroduce it without first
         # changing the stage polarities.
-        if "C" in audit_row["functional_blocks"] or "RC_parallel" in audit_row["functional_blocks"] \
-                or "RC_series" in audit_row["functional_blocks"]:
+        has_c = "C" in audit_row["functional_blocks"]
+        has_rc = ("RC_parallel" in audit_row["functional_blocks"]
+                  or "RC_series" in audit_row["functional_blocks"])
+        if has_c or has_rc:
+            # NULLING-BRANCH REPAIR (2026-08-16). This function's contract
+            # ("R+C -> nulling branch", above) was never implemented: C,
+            # RC_parallel and RC_series all mapped to the same lone Miller
+            # capacitor, which made 2s_rc and 2s_miller PHYSICALLY
+            # IDENTICAL netlists. Measured consequences of that collapse:
+            # both pipeline branches frequently sized the same circuit
+            # twice (byte-identical A/B verification netlists, GATE3
+            # boundary spec), the selection layer had nothing real to
+            # choose between, the rz_x sizing knob scaled a resistor that
+            # never existed, and the RHP zero of plain Miller compensation
+            # forced huge caps (2.8 nF measured) that buried UGBW 47x
+            # below target on the boundary spec class. RC-type blocks now
+            # realise the series nulling resistor the family always
+            # promised; pure-C blocks keep the plain Miller cap.
+            cap_p = prev
+            if has_rc:
+                mid = f"nz{k}"
+                g.devices.append(DeviceRecord(
+                    f"RZ{k}", "res", "nulling_resistor",
+                    {"p": prev, "n": mid}, None,
+                    {"value": PRIORS["rz_ohm"]["value"],
+                     "origin": PRIORS["rz_ohm"]["origin"]},
+                    {"structural_evidence": "RC-type block in source graph",
+                     "compensation_topology": "miller_rz_series",
+                     "encloses_inversions": 1, **ev}))
+                cap_p = mid
             g.devices.append(DeviceRecord(f"CC{k}", "cap", "miller_compensation",
-                                          {"p": prev, "n": out}, None,
+                                          {"p": cap_p, "n": out}, None,
                                           {"value": PRIORS["miller_cap_f"]["value"],
                                            "origin": PRIORS["miller_cap_f"]["origin"]},
-                                          {"structural_evidence": "C-type block in source graph",
-                                           "compensation_topology": "miller_per_stage",
+                                          {"structural_evidence":
+                                           ("RC-type block in source graph"
+                                            if has_rc else
+                                            "C-type block in source graph"),
+                                           "compensation_topology":
+                                           ("miller_rz_series" if has_rc
+                                            else "miller_per_stage"),
                                            "encloses_inversions": 1, **ev}))
         prev = out
         inversions += 1

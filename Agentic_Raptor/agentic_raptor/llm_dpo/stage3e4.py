@@ -50,11 +50,25 @@ def variant_text(stages: int, comp: str, buf: bool, fb: bool) -> str:
     return json.dumps(p, separators=(",", ":"))
 
 
+def tier2_flags(obj: dict) -> tuple:
+    """(cascode_input, class_ab_output) read from the proposal's stage
+    blocks -- the TIER-2 VOCABULARY (2026-08-17)."""
+    blocks = [s.get("block") for s in (obj.get("stages") or [])
+              if isinstance(s, dict)]
+    return ("cascode_input_stage" in blocks, "class_ab_output_stage" in blocks)
+
+
 def variant_hash(obj: dict) -> str:
-    key = (len(obj.get("stages", [])),
+    key = [len(obj.get("stages", [])),
            (obj.get("compensation") or [{}])[0].get("type", "none")
            if obj.get("compensation") else "none",
-           bool(obj.get("output_buffer")), bool(obj.get("local_feedback")))
+           bool(obj.get("output_buffer")), bool(obj.get("local_feedback"))]
+    # TIER-2 (2026-08-17): the new blocks are structurally distinct circuits
+    # and must hash distinctly. Appended ONLY when present, so every
+    # pre-existing proposal keeps its historical hash byte-for-byte.
+    cas, ab = tier2_flags(obj)
+    if cas or ab:
+        key += [cas, ab]
     return hashlib.sha256(json.dumps(key).encode()).hexdigest()[:16]
 
 
@@ -430,6 +444,13 @@ def propose_diverse(model, tok, prompt: str, target_k: int = 5,
             h = variant_hash(obj)
             if h in seen:
                 continue
+            since_new = 0
+            # PLAN-SATISFIED STOP (2026-08-19, opt-in): the caller (the
+            # Topology Critic) knows when the pool already meets the plan;
+            # stop hunting the moment it does instead of burning the
+            # remaining ladder on families the plan does not need.
+            # Measured: tier-2 AG spent ~10 LLM generations/spec (~25 s
+            # each) hunting a 5th family after the plan was met at ~4.
             seen[h] = {"seed": attempts, "parseable": True, "valid": True,
                        "reasons": [], "graph_hash": h, "obj": obj,
                        "temperature": temp, "top_p": top_p,
@@ -462,7 +483,9 @@ def _exclusion_prompt(prompt: str, seen: dict) -> str:
 
 def propose_diverse_excl(model, tok, prompt: str, target_k: int = 5,
                          ladder=DIVERSITY_LADDER, seed0: int = 0,
-                         family_fn=None) -> dict[str, Any]:
+                         family_fn=None, stall_stop: int | None = None,
+                         max_attempts: int | None = None,
+                         satisfied_fn=None) -> dict[str, Any]:
     """Diverse proposal that USES the exclusion conditioning it was trained on.
 
     propose_diverse() widens temperature only. The repaired corpus also
@@ -474,10 +497,19 @@ def propose_diverse_excl(model, tok, prompt: str, target_k: int = 5,
 
     Every candidate is still the model's own output; this changes what the
     model is ASKED, not what it is credited with.
+
+    ADAPTIVE ATTEMPTS (2026-08-17, opt-in): `stall_stop=N` ends the hunt
+    after N consecutive attempts that added no NEW distinct candidate --
+    the model has emptied its repertoire (measured: 4 families arrive in
+    ~5 attempts, then ~15 attempts of repeats hunting a fifth that never
+    comes, ~5-6 min/spec of pure LLM waste). `max_attempts` caps total
+    attempts. Both None (default) = byte-identical historical behavior.
     """
     import torch
     seen: dict[str, dict] = {}
     attempts, rungs_used = 0, []
+    since_new = 0
+    stalled = False
 
     def _family(obj):
         if family_fn:
@@ -491,10 +523,19 @@ def propose_diverse_excl(model, tok, prompt: str, target_k: int = 5,
     for temp, top_p, n in ladder:
         used = False
         for _j in range(n):
-            if len(seen) >= target_k:
+            if len(seen) >= target_k or stalled:
+                break
+            if max_attempts is not None and attempts >= max_attempts:
+                stalled = True
                 break
             used = True
             attempts += 1
+            since_new += 1
+            if stall_stop is not None and since_new > stall_stop:
+                stalled = True
+                attempts -= 1        # this attempt is not made
+                since_new -= 1
+                break
             # condition on what we already have, exactly as trained
             cur = _exclusion_prompt(prompt, seen) if seen else prompt
             # pass the mask explicitly: pad_token == eos_token, so transformers
@@ -520,20 +561,31 @@ def propose_diverse_excl(model, tok, prompt: str, target_k: int = 5,
             h = variant_hash(obj)
             if h in seen:
                 continue
+            since_new = 0
+            # PLAN-SATISFIED STOP (2026-08-19, opt-in): the caller (the
+            # Topology Critic) knows when the pool already meets the plan;
+            # stop hunting the moment it does instead of burning the
+            # remaining ladder on families the plan does not need.
+            # Measured: tier-2 AG spent ~10 LLM generations/spec (~25 s
+            # each) hunting a 5th family after the plan was met at ~4.
             seen[h] = {"seed": attempts, "parseable": True, "valid": True,
                        "reasons": [], "graph_hash": h, "obj": obj,
                        "family": _family(obj),
                        "temperature": temp, "top_p": top_p,
                        "excluded_count": len(seen),
                        "source": "llm_diverse_exclusion"}
+            if satisfied_fn is not None and satisfied_fn(list(seen.values())):
+                stalled = True
+                break
         if used:
             rungs_used.append({"temperature": temp, "top_p": top_p})
-        if len(seen) >= target_k:
+        if len(seen) >= target_k or stalled:
             break
     return {"candidates": list(seen.values()),
             "distinct": len(seen), "target_k": target_k,
             "reached_target": len(seen) >= target_k,
             "attempts": attempts, "rungs_used": rungs_used,
+            "stall_stopped": stalled,
             "conditioning": "exclusion",
             "max_temperature": rungs_used[-1]["temperature"]
             if rungs_used else None}

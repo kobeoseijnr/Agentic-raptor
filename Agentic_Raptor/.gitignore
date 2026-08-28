@@ -7,3 +7,4 @@ outputs/*
 !outputs/.gitkeep
 *.jsonl
 .env
+external_baselines/

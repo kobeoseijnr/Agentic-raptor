@@ -257,3 +257,27 @@ def test_retrain_branch_only_reached_when_unfrozen_and_over_threshold():
     assert "train_proposer_candidate(" in retrain_branch
     assert "eval_proposer(" in retrain_branch
     assert "proposer_gates(" in retrain_branch
+
+
+def test_proposer_gate_accepts_quality_gain_at_pass_rate_ceiling():
+    """2026-08-22 gate repair: at a pass-rate ceiling (1.0 vs 1.0) a candidate
+    that strictly improves quality must PASS; the old rule demanded both
+    metrics improve and rejected every candidate at the ceiling."""
+    from agentic_raptor.selfimprove_v2.gates import proposer_gates
+    base = {"structural_validity_rate": 1.0, "mean_distinct_graphs": 5.0,
+            "duplicate_rate": 0.0, "success_at_k": 1.0}
+    acc = dict(base, measured_selected_quality=10610.3, final_pass_rate=1.0)
+    better = dict(base, measured_selected_quality=12000.0, final_pass_rate=1.0)
+    assert proposer_gates(better, acc).passed
+    # exact tie on both -> no evidence -> reject
+    tie = dict(base, measured_selected_quality=10610.3, final_pass_rate=1.0)
+    r = proposer_gates(tie, acc)
+    assert not r.passed and any("no_strict_improvement" in x for x in r.failures)
+    # quality up but pass rate DOWN -> regression -> reject
+    worse_pass = dict(base, measured_selected_quality=12000.0, final_pass_rate=0.8)
+    r = proposer_gates(worse_pass, acc)
+    assert not r.passed and any("final_pass_rate_declined" in x for x in r.failures)
+    # pass rate up, quality flat -> accept
+    more_pass = dict(base, measured_selected_quality=10610.3, final_pass_rate=1.0)
+    acc_low = dict(base, measured_selected_quality=10610.3, final_pass_rate=0.5)
+    assert proposer_gates(more_pass, acc_low).passed

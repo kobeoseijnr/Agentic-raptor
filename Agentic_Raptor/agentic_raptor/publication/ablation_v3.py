@@ -72,10 +72,25 @@ class AblationConfig:
     sizing_method: str = "sac"  # "tpe_lite" | "grid" | "random" when use_sac=False
     use_surrogate: bool = True
     use_sizing_ranker: bool = True
+    # Stage 8 (2026-08-12, second deployment): default flipped back to True.
+    # Stage 7.1/7.2A found the ORIGINAL 11-feature learned DPO ranker
+    # LEARNED_DPO_NOT_JUSTIFIED, which briefly flipped this default False.
+    # Stage 7.2B then found a richer 46-feature representation
+    # (POST_SAC_FEATURES_V2) genuinely beats the deterministic selector
+    # (77.80% vs 74.66% run-grouped DEV ranker-authority accuracy, 77
+    # wins/45 losses/0 catastrophic errors -- see artifacts/publication_v3/
+    # stage7_2b_dpo_repair/STAGE7_2B_REPORT.json), so DPO was re-justified
+    # and FULL (A0) once again carries the learned Level-2 ranker by
+    # default, matching run_raptor_v2.run_pipeline's restored default.
     use_dpo: bool = True
     learning_mode: str = "frozen"   # A0-A8 evaluation is always frozen
     budget: ExperimentBudget = field(default_factory=ExperimentBudget)
     requires_puct_value_checkpoint: bool = True   # False only for A5 (search="none")
+    # Stage 8 (second deployment): A8 (NO_LEARNED_DPO) is meaningful again
+    # now that FULL once more carries a learned DPO to remove -- see
+    # A8_NO_DPO below, un-retired.
+    retired: bool = False
+    retired_reason: str | None = None
 
     def __post_init__(self):
         # The current v2 search implementation has exactly two modes:
@@ -104,12 +119,26 @@ class AblationConfig:
 
     def to_run_pipeline_kwargs(self) -> dict:
         """Exact kwargs for run_raptor_v2.run_pipeline. This is the ONLY
-        place ablation switches translate into pipeline parameters."""
+        place ablation switches translate into pipeline parameters.
+
+        SELECTOR CHANGE (2026-08-15, user decision after the GATE2 +
+        determinism findings): use_mcts=True now maps to
+        search="bandit_top2" -- the hash-pinned BANDIT_TOP2_V1 linear
+        contextual bandit replaces AlphaZero as FULL's topology selector.
+        Grounds: AlphaZero never added a pass in any campaign (old-gate,
+        GATE2, F0-F3, per-seed retention 24/24 but zero gains, 97%
+        destructive edits), while the bandit passed its offline
+        spec-disjoint gate (12/12 vs prior 1/12) and matched the best arm
+        on TRAIN electrically with a unique pass. use_mcts=False stays
+        search="none" (direct prior top-K), so A5 now ablates the LEARNED
+        TOPOLOGY SELECTOR (bandit vs deterministic prior). True AlphaZero
+        remains available via run_pipeline(search="one_root"/"one_root_cc"
+        /"bandit_top2_az") as an opt-in research mode."""
         return {
             "conditioning": ("exclusion" if self.use_exclusion_conditioning
                              else "temperature"),
-            "search": "one_root" if self.use_mcts else "none",
-            "ranker_mode": "dpo" if self.use_dpo else "baseline",
+            "search": "bandit_top2" if self.use_mcts else "none",
+            "ranker_mode": "dpo" if self.use_dpo else "deterministic",
             "sizing_method": self.sizing_method,
             "use_surrogate": self.use_surrogate,
             "use_sizing_ranker": self.use_sizing_ranker,
@@ -206,10 +235,17 @@ A4_NO_DIVERSITY = AblationConfig(
 # use_mcts/use_puct=False -> to_run_pipeline_kwargs()["search"]=="none"
 # already means exactly this); the DATA (name/question) reflects the new
 # architecture.
+# 2026-08-15 (GATE3 era): FULL's selector is now BANDIT_TOP2_V1 (see
+# to_run_pipeline_kwargs), so this arm's question changed from "does
+# AlphaZero add value" to "does the LEARNED topology selector add value
+# over the deterministic prior ranking". The id stays A5 for table
+# continuity across campaigns; the name/question reflect what it now
+# measures. (AlphaZero's own verdict is closed: never added a pass in
+# any campaign -- STAGE9_GATE2_ANALYSIS.json.)
 A5_NO_MCTS_PUCT = AblationConfig(
-    "A5", "NO_ALPHAZERO",
-    "Does TRUE_ALPHAZERO topology search/refinement add value beyond "
-    "direct learned candidate ranking (no search, no topology edits)?",
+    "A5", "NO_TOPOLOGY_SELECTOR",
+    "Does the learned bandit topology selector (BANDIT_TOP2_V1) add value "
+    "beyond the deterministic prior ranking (search='none')?",
     use_mcts=False, use_puct=False, requires_puct_value_checkpoint=False)
 
 A6_NO_SAC = AblationConfig(
@@ -225,8 +261,17 @@ A7_NO_SURROGATE = AblationConfig(
 
 A8_NO_DPO = AblationConfig(
     "A8", "NO_LEARNED_DPO_RANKER",
-    "Does learned post-SAC ranking improve final candidate selection over "
-    "the hard safety gate alone?", use_dpo=False)
+    "Un-retired (Stage 8, 2026-08-12, second deployment): Stage 7.2B "
+    "re-justified the learned DPO ranker (POST_SAC_FEATURES_V2,  "
+    "DPO_REJUSTIFIED), so FULL (A0) once again carries a learned Level-2 "
+    "ranker for this arm to meaningfully remove. Same full pipeline, same "
+    "hard safety gate, same candidate inputs, same MB-SAC, same budgets -- "
+    "only the learned DPO is disabled in favor of the predeclared "
+    "deterministic selector. Does NOT remove the hard safety gate. "
+    "Question: does learned post-SAC ranking (DPO V2) improve final "
+    "candidate selection over the hard safety gate + deterministic "
+    "selector alone?",
+    use_dpo=False, retired=False)
 
 A9_STATIC = AblationConfig(
     "A9", "NO_SELF_IMPROVEMENT_STATIC",
@@ -253,6 +298,20 @@ COMPONENT_ABLATIONS: dict[str, AblationConfig] = {
 # Deliberately NOT a new duplicate result dataclass mirrored in code AND
 # json -- this is a pure reshape of the trace dict already on disk.
 # ============================================================================
+STOCK_FAMILIES = ("1s_none", "2s_none", "2s_miller", "2s_rc",
+                  "3s_none", "3s_miller", "3s_rc")
+
+
+def _selected_family(trace: dict) -> str | None:
+    """Family of the design that reached authoritative verification."""
+    sr = trace.get("stage8_ranker") or {}
+    sel_hash = sr.get("selected_topology_hash")
+    for r in (trace.get("stage5_alphazero") or {}).get("ranking") or []:
+        if r.get("canonical_graph_hash") == sel_hash:
+            return r.get("canonical_family")
+    return None
+
+
 def build_result_record(trace: dict, config: AblationConfig, *,
                         experiment_id: str, pipeline_seed: int,
                         spec_index: int | None = None,
@@ -292,6 +351,11 @@ def build_result_record(trace: dict, config: AblationConfig, *,
         "spec_hash": spec_hash,
         "topology_id": spec.get("topology_id"),
         "split": trace.get("stage1_spec", {}).get("split"),
+        # LLM-VALUE PROBE (2026-08-17): which topology WON, so the analysis
+        # can count passes whose winning structure lies OUTSIDE the stock
+        # template library (composition beyond retrieval)
+        "selected_family": _selected_family(trace),
+        "selected_hash": (trace.get("stage8_ranker") or {}).get("selected_topology_hash"),
         "pipeline_seed": pipeline_seed,
         "generation_id": generation_id,
         "configuration_hash": config.config_hash(),

@@ -73,6 +73,9 @@ def _obj_hash(obj) -> str:
 # SFT admission: the strictest stream, because a wrong target teaches the
 # proposer to emit something that does not work.
 # --------------------------------------------------------------------------
+TRAIN_SPLITS = frozenset({"train", "tier2_train"})
+
+
 def sft_admission_reasons(hv: dict, label: str, *, split: str,
                           protected_ids: set,
                           quality_threshold: float | None = None) -> list:
@@ -86,8 +89,12 @@ def sft_admission_reasons(hv: dict, label: str, *, split: str,
     auth = br.get("authoritative")
     des = br.get("design") or {}
     spec = hv.get("spec") or {}
-
-    if split != "train":
+    # 2026-08-23: TRAINING splits are "train" (stock) and "tier2_train" (the
+    # sealed tier-2 grid's training half). The A9 tier-2 profile's G0 audit
+    # found 12/12 tier-2 passes rejected here as "not_train_split" -- the
+    # guard predates tier-2 and treated every non-"train" split as
+    # evaluation. heldout / blindtest / tier2 / tier2_heldout stay rejected.
+    if split not in TRAIN_SPLITS:
         bad.append(f"not_train_split:{split}")
     if spec.get("spec_id") in protected_ids:
         bad.append("protected_evaluation_record")
@@ -196,6 +203,16 @@ def harvest_run(hv: dict, *, split: str, protected_ids: set,
             "spec_index": hv.get("spec_index"),
             "requested_c_load_f": hv.get("requested_c_load_f"),
             "electrical_environment_version": POST_CLOAD_FIX_V1}
+
+    # 2026-08-23: carry the proposal JSON on each pair design so the bandit
+    # refit can realize a device graph for ANY harvested topology (tier-2
+    # LLM variants are not guaranteed to be in a corpus by canonical hash)
+    _cand_by_pid = {c.get("llm_proposal_id"): c for c in hv.get("candidates") or []}
+    for _br in (A, B):
+        _d = _br.get("design") or {}
+        _c = _cand_by_pid.get(_d.get("llm_proposal_id"))
+        if _c is not None and "obj" not in _d:
+            _d["obj"] = _c.get("obj")
 
     # ---- 1. ranker pairs: need BOTH sides authoritatively measured --------
     if aA and aB and aA.get("call_id") != aB.get("call_id"):

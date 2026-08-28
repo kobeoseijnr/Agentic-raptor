@@ -105,10 +105,12 @@ def main():
                     help="train-split specs (excluded: protected + this "
                          "generation's own harvest range) for the cheap, "
                          "no-SPICE Section 12 capability probe")
-    ap.add_argument("--downstream-eval-specs", type=int, default=2,
+    ap.add_argument("--downstream-eval-specs", type=int, default=6,
                     help="Section 13's real-SPICE check -- kept SMALL "
                          "deliberately (Section 20): genuinely SPICE-costly")
-    ap.add_argument("--budget", type=int, default=12)
+    ap.add_argument("--budget", type=int, default=32,
+                    help="per-branch sizing budget for the downstream check; "
+                         "32 == the production ablation budget (2026-08-22)")
     ap.add_argument("--target-k", type=int, default=5)
     ap.add_argument("--ranker-ckpt", default=None)
     ap.add_argument("--value-ckpt", default=None)
@@ -121,9 +123,22 @@ def main():
                     help="allow overwriting an already-PROMOTED "
                          "--output-generation (refused by default -- "
                          "choose a new generation id instead)")
+    ap.add_argument("--profile", choices=("stock", "tier2"), default="stock",
+                    help="tier2: train the tier-2 lineage's proposer chain "
+                         "(G0 = production tier-2 adapter + mixed corpus); "
+                         "downstream check on tier2_train specs (2026-08-22)")
     args = ap.parse_args()
 
     from agentic_raptor.selfimprove_v2 import sft_self_improvement as si
+    if args.profile == "tier2":
+        import run_a9_generations as a9
+        prof = a9.PROFILES["tier2"]
+        cfg = si.configure_profile(
+            prof["sft_generations_root"], prof["adapter"],
+            (ROOT / "artifacts/publication_v3/tier2/corpus_tier2_mixed.json"))
+        print(f"profile tier2: {cfg}", flush=True)
+        if not args.si_root:
+            args.si_root = str(prof["root"] / "data" / args.lineage)
 
     # ---- Section 16/17: the in-process lineage guard, before ANYTHING
     # else runs (no dataset build, no file write, no model load).
@@ -152,6 +167,17 @@ def main():
         si_root = rsi.SI_REAL
     gens = ([int(x) for x in args.generations.split(",")]
            if args.generations else None)
+    # 2026-08-22: the A9 data root is LINEAGE-SCOPED (si_root/<lineage>/
+    # gen_NNN). A root with no gen_* of its own but a <lineage>/gen_* child
+    # resolves to that child; a root with no generations at all is a hard
+    # error -- the earlier silent "no eligible examples" masked a wrong
+    # --si-root and skipped a real 36-row harvest.
+    if not list(si_root.glob("gen_*")) and list((si_root / args.lineage).glob("gen_*")):
+        si_root = si_root / args.lineage
+        print(f"si-root resolved to lineage directory: {si_root}", flush=True)
+    if not list(si_root.glob("gen_*")):
+        raise SystemExit(f"ERROR: no gen_* directories under {si_root} -- "
+                         f"pass --si-root <a9_root>/data/{args.lineage}")
     queue_rows = collect_queue_rows(si_root, gens)
     print(f"harvested {len(queue_rows)} raw sft_queue rows from {si_root} "
          f"(generations={gens or 'all'})", flush=True)
@@ -201,8 +227,10 @@ def main():
     # ---- validate: Section 12, cheap capability probe -------------------
     from agentic_raptor.publication.spec_registry import build as build_registry
     reg = build_registry()
-    harvested_idxs = {r.get("spec_index") for r in queue_rows
-                      if r.get("spec_index") is not None}
+    # harvest keys are (split, spec_index): indices collide across splits
+    harvested_keys = {(r.get("split") or "train", r.get("spec_index"))
+                      for r in queue_rows if r.get("spec_index") is not None}
+    harvested_idxs = {ix for sp, ix in harvested_keys if sp == "train"}
     cap_entries = [e for e in reg["entries"] if e["split"] == "train"
                   and e["context_id"] not in protected_ids and e["parsed_spec"]
                   and e["spec_index"] not in harvested_idxs]
@@ -238,7 +266,33 @@ def main():
     # ---- validate: Section 13, small real-SPICE downstream check --------
     downstream_gate = {"passed": True, "failures": [], "skipped": True}
     cand_downstream = parent_downstream = None
-    downstream_idxs = [e["spec_index"] for e in cap_entries[:args.downstream_eval_specs]]
+    # 2026-08-22: downstream specs are STRATIFIED across the eligible list
+    # (evenly spaced by spec_index) instead of "the first N" -- the first N
+    # were the lowest-index, easiest specs, all at pass-rate ceiling, so the
+    # gate could not see improvement. Stratification spans the difficulty
+    # range of the harvest-disjoint TRAIN specs.
+    all_elig = sorted([e for e in reg["entries"] if e["split"] == "train"
+                       and e["context_id"] not in protected_ids and e["parsed_spec"]
+                       and e["spec_index"] not in harvested_idxs],
+                      key=lambda e: e["spec_index"])
+    n_ds = min(args.downstream_eval_specs, len(all_elig))
+    stride = max(1, len(all_elig) // max(1, n_ds))
+    downstream_idxs = [all_elig[i * stride]["spec_index"] for i in range(n_ds)]
+    downstream_split = "train"
+    if args.profile == "tier2":
+        # the tier-2 profile's signal lives on tier2_train specs: evaluate
+        # downstream on harvest-disjoint tier2_train indices (the sealed
+        # tier2_heldout exam is never used here)
+        from agentic_raptor.publication.tier2 import load_tier2_specs
+        t2_harvested = {ix for sp, ix in harvested_keys if sp == "tier2_train"}
+        t2_idx = [i for i in range(len(load_tier2_specs("tier2_train")))
+                  if i not in t2_harvested]
+        n_t2 = min(args.downstream_eval_specs, len(t2_idx))
+        stride2 = max(1, len(t2_idx) // max(1, n_t2))
+        downstream_idxs = [t2_idx[i * stride2] for i in range(n_t2)]
+        downstream_split = "tier2_train"
+        print(f"profile tier2: downstream check on tier2_train indices "
+              f"{downstream_idxs} (harvest-disjoint)", flush=True)
     if downstream_idxs:
         from run_self_improvement_v2 import eval_proposer
         from agentic_raptor.selfimprove_v2 import proposer_gates
@@ -246,7 +300,7 @@ def main():
         print(f"downstream real-SPICE check on {len(downstream_idxs)} specs "
              f"(budget={args.budget}) -- genuinely SPICE-costly", flush=True)
         common = dict(
-            eval_idxs=downstream_idxs, split="train",
+            eval_idxs=downstream_idxs, split=downstream_split,
             ranker_ckpt=args.ranker_ckpt, value_ckpt=args.value_ckpt,
             rag_memory=(args.rag_memory or str(v2.RAG_MEMORY_V2)),
             budget=args.budget, target_k=args.target_k, seed=args.seed)

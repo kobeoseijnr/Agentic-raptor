@@ -474,6 +474,21 @@ def write_versioned_dataset(dataset: dict, out_dir: Path) -> dict:
 # ---------------------------------------------------------------------------
 # 10/16/17. generation checkpointing + A0-A8 freeze / A9 lineage guard
 # ---------------------------------------------------------------------------
+def configure_profile(generations_root: Path, base_adapter: Path,
+                      base_corpus: Path) -> dict:
+    """2026-08-22: re-point the generation chain at a profile (e.g. the
+    tier-2 lineage: its own G0 = the production tier-2 proposer + the mixed
+    corpus that holds the tier-2 prompts). Called once by the trainer
+    before anything else; the stock chain is untouched unless the stock
+    roots are passed back in."""
+    global GENERATIONS_ROOT, BASE_ADAPTER, BASE_CORPUS
+    GENERATIONS_ROOT = Path(generations_root)
+    BASE_ADAPTER = Path(base_adapter)
+    BASE_CORPUS = Path(base_corpus)
+    return {"generations_root": str(GENERATIONS_ROOT),
+            "base_adapter": str(BASE_ADAPTER), "base_corpus": str(BASE_CORPUS)}
+
+
 def generation_dir(gen_id: str) -> Path:
     return GENERATIONS_ROOT / gen_id
 
@@ -499,11 +514,13 @@ def write_generation_manifest(gen_id: str, manifest: dict) -> Path:
     return p
 
 
-def ensure_g0_manifest(base_adapter: Path = BASE_ADAPTER,
-                       base_corpus_path: Path = BASE_CORPUS) -> dict:
+def ensure_g0_manifest(base_adapter: Path | None = None,
+                       base_corpus_path: Path | None = None) -> dict:
     """Bootstraps G0's manifest, pointing read-only at the pre-existing
     structural adapter -- never copies, moves, or retrains it. Idempotent:
     returns the existing manifest unchanged if one is already there."""
+    base_adapter = Path(base_adapter or BASE_ADAPTER)
+    base_corpus_path = Path(base_corpus_path or BASE_CORPUS)
     existing = read_generation_manifest("G0")
     if existing is not None:
         return existing

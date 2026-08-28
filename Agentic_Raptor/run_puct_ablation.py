@@ -281,11 +281,31 @@ def _realise(obj):
 
     class _S:
         topology_id = "puct_ab"
+    # NULLING-BRANCH REPAIR (2026-08-16): this translation used to flatten
+    # EVERY compensation type to a bare "C" block, so the LLM's explicit
+    # "rc_nulling" proposals realised identically to "miller_cap" ones --
+    # 2s_rc and 2s_miller were byte-identical netlists (the mapper's R+C
+    # branch was unreachable from here). The proposal's own type now maps
+    # faithfully: rc_nulling -> RC_series (mapper adds the series nulling
+    # resistor), anything else compensation-like -> C (plain Miller).
+    comp_types = {c.get("type") for c in (obj.get("compensation") or [])
+                  if isinstance(c, dict)}
+    blocks = []
+    if "rc_nulling" in comp_types:
+        blocks.append("RC_series")
+    if comp_types - {"rc_nulling"}:
+        blocks.append("C")
+    # TIER-2 (2026-08-17): structural blocks -> mapper flags. gain_stages
+    # counts GAIN stages only (a class-AB output IS the last gain stage; a
+    # cascode input IS the first), so the stage list length is unchanged.
+    from agentic_raptor.llm_dpo.stage3e4 import tier2_flags
+    cas, ab = tier2_flags(obj)
     g, _ = map_family(_S(), {
         "topology_id": _S.topology_id, "gain_stages": len(obj["stages"]),
-        "functional_blocks": ["C"] if obj.get("compensation") else [],
+        "functional_blocks": blocks,
         "unresolved_blocks": [], "mapping_readiness": "mapping_ready",
-        "graph_hash": None})
+        "graph_hash": None,
+        "cascode_input": cas, "class_ab_output": ab})
     return g
 
 

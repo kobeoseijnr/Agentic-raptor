@@ -376,9 +376,15 @@ for _name, _t in EDIT_TEMPLATES.items():
     _t["schema_version"] = EDIT_SCHEMA_VERSION
 
 
-def apply_edit(g: DeviceCircuitGraph, edit_type: str) -> tuple[DeviceCircuitGraph, dict[str, Any]]:
-    """Immutable apply + audit (pre/post hash, manifest delta, lineage)."""
-    t = EDIT_TEMPLATES[edit_type]
+def apply_edit(g: DeviceCircuitGraph, edit_type: str,
+               templates: dict | None = None) -> tuple[DeviceCircuitGraph, dict[str, Any]]:
+    """Immutable apply + audit (pre/post hash, manifest delta, lineage).
+
+    `templates` (EDIT-OPERATOR REPAIR task, 2026-08-13): optional override
+    dict for EXPERIMENTAL repaired operator variants -- None (default)
+    keeps the live EDIT_TEMPLATES, byte-identical behavior for every
+    existing caller."""
+    t = (templates or EDIT_TEMPLATES)[edit_type]
     pre_hash, pre_man = device_graph_hash(g), build_manifest(g)
     ng = t["fn"](g)
     post_man = build_manifest(ng)
@@ -448,7 +454,11 @@ def qualify_device_graph(tid: str, g: DeviceCircuitGraph, wdir: Path, exe: str,
 # Part L: complete-topology proposal interface
 # ---------------------------------------------------------------------------
 SUPPORTED_BLOCKS = {"five_transistor_first_stage", "cs_gain_stage", "miller_cap",
-                    "bias_mirror", "output_follower"}
+                    "bias_mirror", "output_follower",
+                    # TIER-2 VOCABULARY (2026-08-17): structures the fixed
+                    # template library does not contain -- realized by
+                    # mapping.map_family(cascode_input / class_ab_output)
+                    "cascode_input_stage", "class_ab_output_stage"}
 PROPOSAL_SCHEMA_VERSION = "3e2.1"
 
 

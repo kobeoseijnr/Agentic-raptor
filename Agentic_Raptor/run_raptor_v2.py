@@ -184,8 +184,24 @@ def retrieve_topology_candidates(spec: dict, target_k: int = TARGET_K,
 
     from agentic_raptor.llm_dpo.stage3e4 import variant_hash
     corpus = json.loads((ROOT / "artifacts/stage3e4/corpus.json").read_text())
+    records = list(corpus["records"])
+    # TIER-2 FAIRNESS (2026-08-17): the template library sees the SAME
+    # tier-2 corpus extension the SFT retrain sees -- otherwise A1 would
+    # lose tier-2 specs by ACCESS, not capability. tier-2 records are
+    # split "train" (their specs are tier2_train), never tier2_heldout.
+    # A1 LIBRARY SCOPE (2026-08-19): by default the no-LLM arm's library
+    # includes the tier-2 corpus extension ("helped" -- same knowledge the
+    # SFT model was trained on). Those records exist ONLY because the LLM
+    # composed the structures, so the paper also needs the UNHELPED row:
+    # the library as it existed before the LLM (stock only). Set
+    # RAPTOR_A1_STOCK_ONLY=1 to exclude the extension.
+    import os as _os
+    from agentic_raptor.publication.tier2 import TIER2_CORPUS_EXT
+    if TIER2_CORPUS_EXT.is_file() and not _os.environ.get("RAPTOR_A1_STOCK_ONLY"):
+        ext = json.loads(TIER2_CORPUS_EXT.read_text(encoding="utf-8"))
+        records += [r for r in ext["records"] if r.get("tier2")]
     protected_ids = protected_ids or set()
-    pool = [r for r in corpus["records"] if r["split"] == split
+    pool = [r for r in records if r["split"] == split
            and r.get("topology_id") != exclude_topology_id
            and r.get("context_id") not in protected_ids]
     rng = random.Random(seed)
@@ -230,7 +246,9 @@ def propose_and_validate(model, tok, prompt: str, target_k: int = TARGET_K,
                          max_attempts: int = 20,
                          conditioning: str = "exclusion",
                          seed0: int = 0, use_llm: bool = True,
-                         spec: dict | None = None) -> dict:
+                         spec: dict | None = None,
+                         stall_stop: int | None = None,
+                         satisfied_fn=None) -> dict:
     """LLM generates; the validator canonicalises and deduplicates.
 
     Every returned candidate carries source="llm". Nothing is enumerated, and
@@ -262,8 +280,14 @@ def propose_and_validate(model, tok, prompt: str, target_k: int = TARGET_K,
                                                  propose_diverse,
                                                  propose_diverse_excl)
     if conditioning == "exclusion":
+        # ADAPTIVE ATTEMPTS (2026-08-17): stall_stop/max_attempts flow to
+        # the sampler; None keeps the frozen-campaign behavior byte-identical
         res = propose_diverse_excl(model, tok, prompt, target_k=target_k,
-                                   ladder=DIVERSITY_LADDER, seed0=seed0)
+                                   ladder=DIVERSITY_LADDER, seed0=seed0,
+                                   stall_stop=stall_stop,
+                                   max_attempts=(max_attempts
+                                                 if max_attempts != 20 else None),
+                                   satisfied_fn=satisfied_fn)
     else:                       # ablation arm: temperature widening only
         res = propose_diverse(model, tok, prompt, target_k=target_k,
                               ladder=DIVERSITY_LADDER, seed0=seed0)
@@ -343,6 +367,7 @@ def _non_rl_size(method: str, tid: str, g, spec: dict, exe, out_dir: Path,
 
 
 def size_and_predict(selected: list, spec: dict, exe, budget: int,
+                     sizing_early_stop: bool = False,
                      sizing_repeats: int = 1, use_surrogate: bool = True,
                      use_sizing_ranker: bool = True,
                      sizing_method: str = "sac",
@@ -367,17 +392,49 @@ def size_and_predict(selected: list, spec: dict, exe, budget: int,
     and returns explicit UNKNOWNs when the surrogate is unavailable.
 
     `sizing_repeats` > 1 sizes each branch multiple times (seeds 17, 18, ...)
-    and keeps the best attempt. `sac_size` is NOT reproducible at a fixed
-    seed -- three identical calls measured UGBW at 6.9k / 20.0k / 8.2k -- so
-    one attempt reports the sizer's luck as much as the topology's true
+    and keeps the best attempt. HISTORICAL NOTE: `sac_size` was NOT
+    reproducible at a fixed seed -- three identical calls measured UGBW at
+    6.9k / 20.0k / 8.2k. Root-caused 2026-08-15: CandidateFeatures'
+    pool_candidate_id was uuid4 and DPORanker.rank() tie-breaks on it, so
+    tied scores made the measured candidate a per-object lottery. The id is
+    now a content hash and sac_size is bit-reproducible at a fixed seed
+    (verified against real ngspice; tests/test_deterministic_sizing.py).
+    sizing_repeats still measures genuine seed-to-seed variance -- which
+    now IS seed variance, not hidden per-call luck. The historical caveat
+    remains relevant to pre-2026-08-15 results: one attempt reported the
+    sizer's luck as much as the topology's true
     reach. Default is 1 (off): this changes cost and must be opted into, not
     silently applied to a run that was sized to run once.
     """
-    from agentic_raptor.mb_sac.spec_sizing import apply_knobs, sac_size
-    from agentic_raptor.topology_rl.stage3e2 import new_costs
-    from run_puct_ablation import _realise
     out = []
     for label, c in zip("AB", selected):
+        out.append(_size_one_branch(
+            label, c, spec, exe, budget, sizing_early_stop=sizing_early_stop,
+            sizing_repeats=sizing_repeats, use_surrogate=use_surrogate,
+            use_sizing_ranker=use_sizing_ranker, sizing_method=sizing_method,
+            c_load_f=c_load_f))
+    if out[0][0].topology_hash == out[1][0].topology_hash:
+        raise ArchitectureViolation("both branches sized the same topology")
+    return out
+
+
+def _size_one_branch(label: str, c: dict, spec: dict, exe, budget: int, *,
+                     sizing_early_stop: bool = False, sizing_repeats: int = 1,
+                     use_surrogate: bool = True, use_sizing_ranker: bool = True,
+                     sizing_method: str = "sac", c_load_f: float | None = None,
+                     seed_base: int = 17, select_by: str = "reward",
+                     fom_plateau_patience: int | None = None,
+                     tail_anchor_budget: int | None = None) -> tuple:
+    """Size ONE branch -- extracted verbatim from size_and_predict's loop
+    (2026-08-16) so the Optimization Supervisor agent can drive per-branch
+    probe/final phases through the SAME provenance-audited path the
+    baseline uses. `seed_base` exists solely for the Supervisor's
+    PREDEFINED pathology-restart schedule; every baseline caller keeps 17."""
+    from agentic_raptor.mb_sac.spec_sizing import (KNOB_NAMES, apply_knobs,
+                                                    sac_size)
+    from agentic_raptor.topology_rl.stage3e2 import new_costs
+    from run_puct_ablation import _realise
+    if True:
         # AlphaZero edited descendants carry their OWN realised
         # DeviceCircuitGraph (c["device_graph"]) -- an edit applied to a
         # candidate's graph has no natural LLM `obj` JSON form, so
@@ -393,13 +450,17 @@ def size_and_predict(selected: list, spec: dict, exe, budget: int,
             costs = new_costs()
             attempts.append(_non_rl_size(sizing_method, tid, g, spec, exe,
                                          OUT / "sizing", costs, budget,
-                                         seed=17, c_load_f=c_load_f))
+                                         seed=seed_base, c_load_f=c_load_f))
         else:
             for i in range(max(1, sizing_repeats)):
                 costs = new_costs()               # isolated per branch/attempt
                 attempts.append(sac_size(
                     tid, g, spec, exe, OUT / "sizing", costs,
-                    budget=budget, seed=17 + i, persist=False,
+                    budget=budget, seed=seed_base + i, persist=False,
+                    early_stop_on_pass=sizing_early_stop,
+                    select_by=select_by,
+                    fom_plateau_patience=fom_plateau_patience,
+                    tail_anchor_budget=tail_anchor_budget,
                     use_surrogate=use_surrogate,
                     use_ranker=use_sizing_ranker, c_load_f=c_load_f))
 
@@ -462,12 +523,16 @@ def size_and_predict(selected: list, spec: dict, exe, budget: int,
             raise ArchitectureViolation(
                 f"branch {label} sized a topology PUCT did not select")
         # the graph is carried so stage 9 can re-emit the FINAL sized netlist
-        # and measure it in a NEW authoritative call
-        out.append((d, pred, sz, o, apply_knobs(g, list(
-            knobs.values()) if isinstance(knobs, dict) else knobs)))
-    if out[0][0].topology_hash == out[1][0].topology_hash:
-        raise ArchitectureViolation("both branches sized the same topology")
-    return out
+        # and measure it in a NEW authoritative call.
+        # Stage 8 knob-identity audit (Section 15): dict.values() relies on
+        # insertion order matching KNOB_NAMES, which happens to hold today
+        # (spec_sizing.py always builds this dict via zip(KNOB_NAMES, ...))
+        # but is not a structural guarantee -- this is the exact bug SHAPE
+        # a real Campaign 01 Retry terminal_evaluation() regression hit.
+        # Explicit canonical-name lookup cannot silently reorder.
+        knob_vector = ([knobs[name] for name in KNOB_NAMES]
+                       if isinstance(knobs, dict) else knobs)
+        return (d, pred, sz, o, apply_knobs(g, knob_vector))
 
 
 def main():
@@ -560,14 +625,17 @@ def main():
 
 def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
                  budget=32, calibrate=False, conditioning="exclusion",
-                 search="one_root", ranker_mode="dpo", seed=0,
+                 search="bandit_top2", ranker_mode="dpo", seed=0,
                  out_prefix="TRACE", ranker_ckpt=None, value_ckpt=None,
                  rag_memory=None, harvest=False, sizing_repeats=1,
                  pvt_config: PvtConfig | None = None,
                  learning_mode="adaptive", use_surrogate=True,
                  use_sizing_ranker=True, sizing_method="sac",
                  use_llm=True, use_rag=True,
-                 c_load_override_f=None, c_load_override_reason=None):
+                 c_load_override_f=None, c_load_override_reason=None,
+                 total_mcts_simulations: int | None = None,
+                 gate_mode="measured_first", sizing_early_stop=False,
+                 agents: tuple = (), proposal_stall_stop: int | None = None):
     """One full pipeline execution. Returns the trace.
 
     Separated from main() so an ablation can hold ONE loaded model across many
@@ -575,6 +643,52 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
 
     conditioning / search / ranker_mode are the ablation arms; the defaults
     are the production configuration.
+
+    search ("bandit_top2" | "none" | "one_root" | "one_root_cc" |
+    "bandit_top2_az" | per-seed experimental modes): SELECTOR PROMOTION
+    (2026-08-15, user decision). The live default is now "bandit_top2" --
+    the hash-pinned BANDIT_TOP2_V1 linear contextual bandit ranks the
+    validated LLM proposals on 24 physical features and sends its top-2
+    to sizing. AlphaZero ("one_root", the previous default) was demoted
+    after never adding a single pass in any campaign (old-gate, GATE2,
+    F0-F3 interaction tests; per-seed retention 24/24 but zero gains; 97%
+    destructive edit rate); the bandit passed its offline spec-disjoint
+    feasibility gate (12/12 pairwise vs the frozen prior's 1/12) and
+    electrically matched the strongest TRAIN arm with a unique pass
+    (artifacts/publication_v3/bandit_top2_v1/). AlphaZero remains fully
+    functional as an opt-in research/ablation mode, and its enforced
+    checkpoint loading discipline is unchanged wherever it runs.
+
+    gate_mode ("measured_first" | "surrogate"): STAGE 9B GATE PROMOTION
+    (2026-08-15, user decision after electrical confirmation). The live
+    default is now "measured_first": real stage-6 sizing-time SPICE
+    evidence outranks the run-local surrogate at ranking time (measured
+    full-spec pass > all; measured best-distance gap > 0.05 decides;
+    close calls and both-passed go to the learned DPO ranker). Measured
+    basis: F4 3/6 pass vs F0 2/6 on the 6 TRAIN diagnostic specs, +1
+    PVT-robust, both-verified selection accuracy 53% -> 71%, catastrophic
+    discards (distance-0.0 branch thrown away on surrogate stability
+    opinion) eliminated, and the DPO ranker reachable for the first time
+    (9/24 vs 0/24 decisions) -- artifacts/publication_v3/
+    STAGE9B_FINAL_REPORT.json. "surrogate" remains the explicit opt-in
+    for historical reproduction of A0-A8/F0-F3-era selection behavior.
+
+    ranker_mode ("dpo" | "deterministic"): Stage 8 (2026-08-12, second
+    deployment) default is "dpo" again -- hard safety gate + the promoted
+    DPO V2 ranker (agentic_raptor.ranking.model_v2, POST_SAC_FEATURES_V2).
+    Stage 7.1/7.2A found the ORIGINAL 11-feature learned ranker
+    LEARNED_DPO_NOT_JUSTIFIED (briefly making "deterministic" FULL's
+    default); Stage 7.2B then found that a richer 46-feature
+    representation genuinely does beat the deterministic selector (77.80%
+    vs 74.66% run-grouped DEV ranker-authority accuracy, 77 wins/45
+    losses/0 catastrophic errors -- see artifacts/publication_v3/
+    stage7_2b_dpo_repair/STAGE7_2B_REPORT.json), so DPO was re-justified
+    and restored as the default. "dpo" now ONLY ever loads the promoted V2
+    checkpoint (hash-verified, schema-verified, hard-fails rather than
+    falling back on any mismatch -- see model_v2.load_promoted_v2); it can
+    never resolve to the old V1 ranker.pt or any Stage 7/7.1/7.2A rejected
+    checkpoint. "deterministic" remains fully functional as an explicit
+    opt-in for ablation/baseline comparison and historical reproduction.
 
     learning_mode: "adaptive" (default -- everything persists exactly as
     before) | "frozen" | "static". Frozen/static evaluation runs (A0-A8, and
@@ -591,15 +705,41 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
     sanity sweep); c_load_override_reason should say why, and both get
     recorded in trace["stage1_spec"] so paper-mode can hard-fail on an
     override that has no recorded reason.
+
+    search: "one_root" (production default, AZ_BASELINE_SUPERROOT -- one
+    virtual super-root MCTS choosing among LLM seeds via
+    SELECT_EXISTING_TOPOLOGY, then editing) | "none" (A5/NO_ALPHAZERO) |
+    "per_seed" (AlphaZero improvement task candidate architecture,
+    2026-08-12: every validated LLM seed becomes its own independent
+    structural-edit-only MCTS root -- agentic_raptor.topology_rl.alphazero.
+    run_per_seed_alphazero_search -- no SELECT action anywhere; NOT the
+    production default, opt-in only for the search-only/small-real
+    comparison diagnostics this task requires; never used unless
+    explicitly requested).
+
+    total_mcts_simulations: None (default) preserves each search mode's own
+    existing default budget unchanged. Pass an explicit int to make a
+    "one_root" vs "per_seed" comparison run at an EXACTLY matched total
+    simulation count (Part 3's fairness requirement) -- overrides
+    AlphaZeroConfig.alphazero_simulations_per_move for "one_root" and
+    PerSeedAlphaZeroConfig.total_mcts_simulations for "per_seed" alike.
     """
     OUT.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     from agentic_raptor.electrical import discover_ngspice, effective_c_load
 
     # ---- Stage 1: specification -------------------------------------------
-    corpus = json.loads(
-        (ROOT / "artifacts/stage3e4/corpus.json").read_text())
-    pool = [r for r in corpus["records"] if r["split"] == split]
+    if split in ("tier2", "tier2_heldout", "tier2_train"):
+        # TIER-2 EVALUATION SET (2026-08-17): sealed spec grid the stock
+        # library cannot solve; "tier2" == the heldout half.
+        from agentic_raptor.publication.tier2 import load_tier2_specs
+        t2 = load_tier2_specs("tier2_heldout" if split == "tier2" else split)
+        pool = [{"prompt": t["prompt"], "context_id": t["spec_id"],
+                 "topology_id": None} for t in t2]
+    else:
+        corpus = json.loads(
+            (ROOT / "artifacts/stage3e4/corpus.json").read_text())
+        pool = [r for r in corpus["records"] if r["split"] == split]
     if not pool:
         raise SystemExit(f"no records in split {split!r}")
     rec = pool[spec_index % len(pool)]
@@ -631,6 +771,19 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
                              "c_load_override_value": c_load_override_f,
                              "c_load_override_reason": c_load_override_reason}}
 
+    # ---- AGENTIC RAPTOR (2026-08-16): DesignState + Design Planner --------
+    # agents=() (default) is byte-identical baseline. The DesignState is the
+    # blackboard the enabled agents share; the BudgetLedger caps agentic
+    # spend at the BASELINE's own envelope (fairness invariant: an agentic
+    # win can never be bought with extra compute).
+    ag_state = None
+    if agents:
+        from agentic_raptor.agents import make_state
+        ag_state = make_state(spec, tuple(agents),
+                              spice_cap=2 * budget, llm_attempt_cap=20)
+        trace["agent_planner"] = (ag_state.plan.to_dict()
+                                  if "planner" in agents else None)
+
     # ---- Stage 2: RAG ------------------------------------------------------
     rag = rag_stage(spec, rec["prompt"], use_rag=use_rag, memory_path=rag_memory)
     trace["stage2_rag"] = {"retrieval_ids": rag["retrieval_ids"],
@@ -647,9 +800,42 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
                      "use_surrogate": use_surrogate,
                      "use_sizing_ranker": use_sizing_ranker,
                      "use_llm": use_llm, "use_rag": use_rag}
-    prop = propose_and_validate(model, tok, rag["prompt"],
-                                conditioning=conditioning, seed0=seed,
-                                use_llm=use_llm, spec=spec)
+    if ag_state is not None and "critic" in agents and use_llm:
+        # TOPOLOGY CRITIC: iterative propose -> critique -> re-prompt under
+        # the SAME total attempt budget the baseline spends in one shot.
+        from agentic_raptor.agents import run_critic_loop
+
+        def _propose_fn(prompt_text, target_k, max_attempts):
+            from agentic_raptor.agents.critic import critique as _critique
+
+            def _satisfied(raw_cands):
+                # raw sampler records carry "family" (e.g. "4s_rc_ab");
+                # map to the critic's candidate shape and ask the plan
+                pool = [{"canonical_family": c.get("family")} for c in raw_cands]
+                return (_critique(pool, ag_state.plan)["satisfied"]
+                        and len(pool) >= SELECT_K)
+            return propose_and_validate(model, tok, prompt_text,
+                                        target_k=target_k,
+                                        max_attempts=max_attempts,
+                                        conditioning=conditioning, seed0=seed,
+                                        use_llm=use_llm, spec=spec,
+                                        stall_stop=proposal_stall_stop,
+                                        satisfied_fn=_satisfied)
+        loop = run_critic_loop(_propose_fn, rag["prompt"], ag_state.plan,
+                               ag_state.ledger, ag_state)
+        prop = dict(loop["last_raw"] or {})
+        prop["candidates"] = loop["candidates"]
+        prop["distinct"] = len(loop["candidates"])
+        prop["candidate_generation_status"] = (
+            "ok" if len(loop["candidates"]) >= SELECT_K
+            else "insufficient_model_diversity")
+        trace["agent_critic"] = {"rounds": loop["rounds"],
+                                 "final_verdict": loop["final_verdict"]}
+    else:
+        prop = propose_and_validate(model, tok, rag["prompt"],
+                                    conditioning=conditioning, seed0=seed,
+                                    use_llm=use_llm, spec=spec,
+                                    stall_stop=proposal_stall_stop)
     trace["stage3_propose"] = {
         k: prop[k] for k in ("distinct", "target_k", "select_k", "attempts",
                              "max_temperature", "distinct_family_count",
@@ -664,9 +850,16 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
     trace["stage3_propose"]["canonical_graph_hashes"] = [
         c["canonical_graph_hash"] for c in prop["candidates"]]
     from agentic_raptor.ranking import directory_sha256
+    # Provenance guard (2026-08-27): hash the adapter checkpoint ONLY when one
+    # was supplied. Path("") resolves to '.', so hashing an empty adapter
+    # walked the ENTIRE working tree (multi-GB artifacts/) on every base-arm
+    # run -- and labeled a base/no-LLM proposer "SFT".
     trace["models"] = {
-        "proposer": {"training_method": "SFT", "checkpoint": str(adapter),
-                     "hash": directory_sha256(str(adapter))}}
+        "proposer": {
+            "training_method": ("SFT" if adapter
+                                else "base" if use_llm else "none"),
+            "checkpoint": str(adapter) if adapter else None,
+            "hash": directory_sha256(str(adapter)) if adapter else None}}
     trace["stage3_propose"]["reached_target_k"] = (
         prop["distinct"] >= TARGET_K)
     # Abort ONLY when the proposer cannot supply enough candidates for PUCT to
@@ -684,6 +877,22 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
             f"least {SELECT_K} for PUCT to select from; enumeration is NOT "
             f"used to fill the gap")
 
+    # ---- AGENTIC: soft strategy screen before selection -------------------
+    # Drops plan-discouraged-stage candidates ONLY when >= 2 preferred-stage
+    # candidates exist (the "structurally plausible exception" path stays
+    # open -- TRAIN ceilings are priors, never bans).
+    if ag_state is not None and "planner" in agents:
+        from agentic_raptor.agents import apply_strategy_screen
+        screened = apply_strategy_screen(prop["candidates"], ag_state.plan,
+                                         ag_state)
+        if len(screened) >= SELECT_K:
+            prop = dict(prop)
+            prop["candidates"] = screened
+        trace["agent_screen"] = {
+            "kept": len(screened), "of": len(prop["candidates"]),
+            "interventions": [i for i in ag_state.interventions
+                              if i.get("what") == "strategy_screen"]}
+
     # ---- Stage 5: TRUE_ALPHAZERO selects 2 (retired root-level PUCT / --
     # puct_select_two() -- 2026-08-11) ---------------------------------------
     # search="one_root" (still the historical parameter name/default, kept
@@ -695,7 +904,9 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
     # ranking, zero AlphaZero policy/value/search involvement, zero
     # dependency on any retired machinery.
     from agentic_raptor.topology_rl.alphazero import (
-        AlphaZeroConfig, alphazero_select_two, direct_prior_select_two)
+        AlphaZeroConfig, PerSeedAlphaZeroConfig, alphazero_select_two,
+        direct_prior_select_two, run_per_seed_alphazero_search,
+        run_per_seed_alphazero_search_pv)
     if search == "none":
         sel = direct_prior_select_two(prop["candidates"], spec)
         stage5_trace = {
@@ -708,19 +919,203 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
                           "canonical_family", "policy_prior",
                           "value_prediction", "visit_count", "rank",
                           "selected_top2")} for c in sel["ranked"]]}
-    else:
-        az_cfg = AlphaZeroConfig(seed=seed)
-        sel = alphazero_select_two(prop["candidates"], spec, spec["spec_id"],
-                                   value_ckpt=value_ckpt, seed=seed,
-                                   config=az_cfg)
+    elif search == "bandit_top2":
+        # BANDIT_TOP2_V1 (2026-08-14, experimental): learned linear
+        # scoresheet over the 24 physical features ranks the ORIGINAL
+        # validated LLM proposals; top-2 to sizing. No AlphaZero search
+        # runs in this mode. Weights hash-pinned; offline feasibility
+        # gate PASS recorded in the artifact.
+        from agentic_raptor.topology_rl.bandit_selector import \
+            bandit_select_two
+        sel = bandit_select_two(prop["candidates"], spec, spec["spec_id"])
         stage5_trace = {
+            "search_topology": "bandit_top2_linear_scoresheet",
+            "weights_sha256": sel["weights_sha256"],
+            "input_count": len(prop["candidates"]),
+            "selected_count": len(sel["selected"]),
+            "pool_size": sel["pool_size"],
+            "ranking": [{k: c[k] for k in
+                         ("llm_proposal_id", "canonical_graph_hash",
+                          "canonical_family", "bandit_score", "rank",
+                          "selected_top2")} for c in sel["ranked"]]}
+    elif search in ("per_seed", "per_seed_pv", "combined_package",
+                    "combined_portfolio"):
+        pcfg_kwargs = {"seed": seed}
+        if total_mcts_simulations is not None:
+            pcfg_kwargs["total_mcts_simulations"] = total_mcts_simulations
+        pcfg = PerSeedAlphaZeroConfig(**pcfg_kwargs)
+        # "per_seed" = the audited historical baseline (summed-visit top-2,
+        # OUTPUT_SELECTION_DEPTH_BIAS_CONFIRMED); "per_seed_pv" = the
+        # Phase-2 repaired principal-variation selector;
+        # "combined_package" = COMBINED REPAIR PACKAGE TEST (2026-08-13):
+        # per-seed PV extraction + FROZEN_LINEAR_VALUE_V1 leaf value +
+        # REPLACE_COMPENSATION prior x4 (the frozen PKG_4X configuration).
+        # All experimental opt-in modes; "one_root" remains the live
+        # default.
+        _pkg_nets = None
+        _pkg_kwargs = {}
+        if search in ("combined_package", "combined_portfolio"):
+            from agentic_raptor.topology_rl.alphazero import load_alphazero_nets
+            from agentic_raptor.topology_rl.linear_value import (
+                FrozenLinearValue, hybrid_linear_value_nets)
+            # AZ/MCTS experiment layer deleted 2026-08-27 (user decision:
+            # bandit_top2 is the promoted live selector; AlphaZero campaign
+            # drivers removed). This opt-in experimental mode needs the
+            # deleted generator script -- fail loudly, never silently.
+            try:
+                from run_azcompbias_search_only import comp_biased_nets
+            except ImportError as _e:
+                raise RuntimeError(
+                    "search='combined_package'/'combined_portfolio' is retired: "
+                    "run_azcompbias_search_only.py was deleted 2026-08-27 with "
+                    "the AlphaZero/MCTS experiment layer. Live modes: "
+                    "'bandit_top2' (default), 'none' (A5).") from _e
+            _pkg_nets = hybrid_linear_value_nets(
+                comp_biased_nets(load_alphazero_nets(value_ckpt, seed=0), 4.0),
+                FrozenLinearValue())
+        if search == "combined_portfolio":
+            # PACKAGE V2 (post-mortem repair): champion+challenger top-2 +
+            # exclusion of the two causally-dead append operators
+            from agentic_raptor.topology_rl.stage3e2_edits import EDIT_TEMPLATES
+            _pkg_kwargs = {"portfolio": True,
+                          "edit_templates": {k: v for k, v in EDIT_TEMPLATES.items()
+                                             if k not in ("ADD_VERIFIED_STAGE",
+                                                          "ADD_SUPPORTED_OUTPUT_STAGE")}}
+        _search_fn = (run_per_seed_alphazero_search_pv
+                      if search in ("per_seed_pv", "combined_package",
+                                    "combined_portfolio")
+                      else run_per_seed_alphazero_search)
+        sel = _search_fn(
+            prop["candidates"], spec, spec["spec_id"], value_ckpt=value_ckpt,
+            seed=seed, config=pcfg, spec_hash=spec_hash, nets=_pkg_nets,
+            **_pkg_kwargs)
+        # real, computed audit (not assumed from the structural guarantee
+        # alone) -- every node's own action, across every seed's tree.
+        all_nodes = [n for nodes in sel["nodes"].values() for n in nodes]
+        n_select_actions_used = sum(
+            1 for n in all_nodes if n["action"] is not None
+            and n["action"]["action_type"] == "SELECT_EXISTING_TOPOLOGY")
+        unique_states = {n["graph_hash"] for n in all_nodes}
+        unique_terminals = {n["graph_hash"] for n in all_nodes
+                            if n["terminal"] == "terminate_action"}
+        stage5_trace = {
+            "search_topology": ("true_alphazero_per_seed_pv_independent_mcts"
+                               if search == "per_seed_pv"
+                               else "true_alphazero_per_seed_independent_mcts"),
+            "selection_rule": sel.get("selection_rule"),
+            "action_schema": sel["action_schema"],
+            "input_count": len(prop["candidates"]),
+            "selected_count": len(sel["selected"]),
+            "tree_nodes": sel["tree_nodes"],
+            "per_seed_tree_nodes": sel["per_seed_tree_nodes"],
+            "per_seed_simulations_allocated": sel["per_seed_simulations_allocated"],
+            "total_mcts_simulations": sel["total_mcts_simulations"],
+            "allocation_mode": sel["allocation_mode"],
+            "max_depth_reached": sel["max_depth_reached"],
+            "seed_topology_hashes": sel["seed_topology_hashes"],
+            "electrical_environment_version": sel["electrical_environment_version"],
+            "n_select_actions_used": n_select_actions_used,
+            "unique_topology_states": len(unique_states),
+            "unique_terminal_topologies": len(unique_terminals),
+            "ranking": [{k: c[k] for k in
+                         ("llm_proposal_id", "canonical_graph_hash",
+                          "canonical_family", "rank", "visit_count",
+                          "originating_seed_id", "originating_seed_hash",
+                          "edit_history", "edit_depth", "is_edited_descendant")}
+                        for c in sel["selected"]]}
+    else:
+        az_cfg_kwargs = {"seed": seed}
+        if total_mcts_simulations is not None:
+            az_cfg_kwargs["alphazero_simulations_per_move"] = total_mcts_simulations
+        az_cfg = AlphaZeroConfig(**az_cfg_kwargs)
+        # Stage 8 FINAL integration (2026-08-13): the live "one_root" path
+        # must NEVER run on a silently random-initialised network.
+        # Previously value_ckpt defaulted to None and load_alphazero_nets
+        # (None) built a fresh deterministic seed-0 net -- the promoted
+        # checkpoint was never actually loaded on live runs. Now:
+        #   value_ckpt=None  -> load the PROMOTED checkpoint via the
+        #     enforced loader (SHA-256 verified, fingerprinted, hard-fails
+        #     on missing/mismatched/no-effect load -- AlphaZeroCheckpoint
+        #     Error, no fallback);
+        #   value_ckpt=<path> -> explicit override for ablation/experiment
+        #     arms, recorded as such in the trace.
+        if value_ckpt is None:
+            from agentic_raptor.topology_rl.alphazero import \
+                load_promoted_alphazero_nets
+            az_nets, az_ckpt_provenance = load_promoted_alphazero_nets()
+        else:
+            import hashlib as _hashlib
+            from pathlib import Path as _Path
+
+            from agentic_raptor.topology_rl.alphazero import (
+                AlphaZeroCheckpointError, load_alphazero_nets)
+            _ckp = _Path(value_ckpt)
+            if not _ckp.is_file():
+                raise AlphaZeroCheckpointError(
+                    f"explicit value_ckpt does not exist: {value_ckpt} -- "
+                    f"refusing to silently fall back to random initialization")
+            az_nets = load_alphazero_nets(str(_ckp), seed=0)
+            az_ckpt_provenance = {
+                "checkpoint_loaded": True, "checkpoint_path": str(_ckp),
+                "checkpoint_sha256": _hashlib.sha256(_ckp.read_bytes()).hexdigest(),
+                "explicit_override": True}
+        if search == "one_root_cc":
+            # STAGE 9B experimental ALPHAZERO_CHAMPION_CHALLENGER
+            from agentic_raptor.topology_rl.alphazero import                 alphazero_champion_challenger_select_two
+            sel = alphazero_champion_challenger_select_two(
+                prop["candidates"], spec, spec["spec_id"], nets=az_nets,
+                config=az_cfg, seed=seed)
+        elif search == "bandit_top2_az":
+            # OPTION C HYBRID (2026-08-14, experimental): AlphaZero runs
+            # as a CANDIDATE GENERATOR (its top-2, possibly edited
+            # descendants, join the pool); the hash-pinned BANDIT_TOP2_V1
+            # linear scoresheet scores originals + AZ picks and makes the
+            # final top-2 decision.
+            from agentic_raptor.topology_rl.bandit_selector import \
+                bandit_select_two
+            _az = alphazero_select_two(prop["candidates"], spec,
+                                       spec["spec_id"], seed=seed,
+                                       config=az_cfg, nets=az_nets)
+            sel = bandit_select_two(prop["candidates"], spec,
+                                    spec["spec_id"],
+                                    az_selected=_az["selected"])
+            sel["alphazero_generator"] = {
+                "tree_nodes": _az["tree_nodes"],
+                "max_depth_reached": _az["max_depth_reached"],
+                "az_top2_hashes": [c["canonical_graph_hash"]
+                                   for c in _az["selected"]]}
+        else:
+            sel = alphazero_select_two(prop["candidates"], spec, spec["spec_id"],
+                                       seed=seed, config=az_cfg, nets=az_nets)
+        if search == "bandit_top2_az":
+            stage5_trace = {
+                "checkpoint_provenance": az_ckpt_provenance,
+                "search_topology": "bandit_top2_az_hybrid",
+                "weights_sha256": sel["weights_sha256"],
+                "input_count": len(prop["candidates"]),
+                "selected_count": len(sel["selected"]),
+                "pool_size": sel["pool_size"],
+                "az_contributed": sel["az_contributed"],
+                "alphazero_generator": sel["alphazero_generator"],
+                "ranking": [{k: c.get(k) for k in
+                             ("llm_proposal_id", "canonical_graph_hash",
+                              "canonical_family", "bandit_score", "rank",
+                              "selected_top2", "source", "edit_depth",
+                              "is_edited_descendant")} for c in sel["ranked"]]}
+        else:
+            stage5_trace = {
+            "checkpoint_provenance": az_ckpt_provenance,
             "search_topology": "true_alphazero_multi_depth_edit_search",
+            # None for plain one_root; the cc selector's champion hash was
+            # previously dropped here, which nulled the F1/F3 audit column
+            "champion_hash": sel.get("champion_hash"),
             "input_count": len(prop["candidates"]),
             "selected_count": len(sel["selected"]),
             "tree_nodes": sel["tree_nodes"],
             "max_depth_reached": sel["max_depth_reached"],
             "seed_topology_hashes": sel["seed_topology_hashes"],
             "electrical_environment_version": sel["electrical_environment_version"],
+            "unique_topology_states": len(sel["ranked_all"]),
             "ranking": [{k: c[k] for k in
                          ("llm_proposal_id", "canonical_graph_hash",
                           "canonical_family", "rank", "visit_count",
@@ -731,12 +1126,39 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
 
     # ---- Stages 6 + 7: size both, predict both ----------------------------
     exe = discover_ngspice()
-    branches = size_and_predict(sel["selected"], spec, exe, budget,
-                                sizing_repeats=sizing_repeats,
-                                use_surrogate=use_surrogate,
-                                use_sizing_ranker=use_sizing_ranker,
-                                sizing_method=sizing_method,
-                                c_load_f=run_cl)
+    if ag_state is not None and "supervisor" in agents:
+        # OPTIMIZATION SUPERVISOR: probe both branches, reallocate the
+        # remaining budget by real measured evidence, restart pathologies
+        # on the predefined seed schedule. Same total envelope; safety
+        # bounds untouched (they are global pipeline properties).
+        from agentic_raptor.agents import supervise
+
+        def _size_one(label, cand, b, seed_b, early_stop=True, plateau=None,
+                      tail_anchor=None):
+            return _size_one_branch(
+                label, cand, spec, exe, b,
+                sizing_early_stop=early_stop,   # banking is the Supervisor's job
+                select_by="fom",             # QUALITY POLISH: best-FoM pass
+                fom_plateau_patience=plateau,
+                tail_anchor_budget=tail_anchor,
+                sizing_repeats=sizing_repeats, use_surrogate=use_surrogate,
+                use_sizing_ranker=use_sizing_ranker,
+                sizing_method=sizing_method, c_load_f=run_cl,
+                seed_base=seed_b)
+        branches = supervise(_size_one, sel["selected"], spec, budget,
+                             ag_state.ledger, ag_state)
+        if branches[0][0].topology_hash == branches[1][0].topology_hash:
+            raise ArchitectureViolation("both branches sized the same topology")
+        trace["agent_supervisor"] = {"probe": ag_state.branch_probe,
+                                     "allocation": ag_state.branch_allocation}
+    else:
+        branches = size_and_predict(sel["selected"], spec, exe, budget,
+                                    sizing_early_stop=sizing_early_stop,
+                                    sizing_repeats=sizing_repeats,
+                                    use_surrogate=use_surrogate,
+                                    use_sizing_ranker=use_sizing_ranker,
+                                    sizing_method=sizing_method,
+                                    c_load_f=run_cl)
     (da, pa, sza, oa, ga), (db, pb, szb, ob, gb) = branches
 
     def _calls_to_first_pass(sz):
@@ -765,7 +1187,20 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
               "sizing_attempt_passes": o.get("sizing_attempt_passes"),
               "sizing_winning_seed": o.get("sizing_winning_seed"),
               "sizing_spice_calls_all_attempts":
-              o.get("sizing_spice_calls_all_attempts")}
+              o.get("sizing_spice_calls_all_attempts"),
+              # Stage 6.1/Stage 8 (Section 16): runtime confirmation that the
+              # action/replay roundtrip repair holds on THIS run, not just
+              # historically -- None for non-SAC sizing_method arms (e.g.
+              # A6/tpe_lite), which have no action/replay concept at all.
+              "sac_algorithm": sz.get("sac_algorithm"),
+              "actor_params_changed": sz.get("actor_params_changed"),
+              "critic_params_changed": sz.get("critic_params_changed"),
+              "n_transitions_recorded": sz.get("n_transitions_recorded"),
+              "n_nominal_anchor_transitions": sz.get("n_nominal_anchor_transitions"),
+              "n_exploitation_tail_transitions":
+              sz.get("n_exploitation_tail_transitions"),
+              "max_action_roundtrip_error": sz.get("max_action_roundtrip_error"),
+              "final_entropy_alpha": sz.get("final_entropy_alpha")}
         for lbl, d, o, sz in (("A", da, oa, sza), ("B", db, ob, szb))}
     trace["stage7_surrogate"] = {
         lbl: {"gain_db": p.gain_db, "pm_deg": p.pm_deg,
@@ -782,26 +1217,97 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
               "surrogate_checkpoint_hash": p.surrogate_checkpoint_hash}
         for lbl, p in (("A", pa), ("B", pb))}
 
-    # ---- Stage 8: post-SAC ranker selects 1 -------------------------------
-    # A missing checkpoint is explicit, never a silent fallback: the arm name
-    # follows the model that actually decided, so a run made before the
-    # ranker was trained can never be reported as DPO-ranked.
-    from agentic_raptor.ranking.model import PostSACRanker
-    ranker = (PostSACRanker.load(ranker_ckpt)
-              if ranker_mode == "dpo" else None)
+    # ---- Stage 8 (2026-08-12): hard safety gate -> selector ---------------
+    # Stage 7.2B re-justified the learned Level-2 DPO ranker using
+    # POST_SAC_FEATURES_V2 (see artifacts/publication_v3/
+    # stage7_2b_dpo_repair/STAGE7_2B_REPORT.json: DPO_REJUSTIFIED, 77.80%
+    # run-grouped DEV ranker-authority accuracy vs the deterministic
+    # selector's frozen 74.66%, 77 wins/45 losses/0 catastrophic errors).
+    # `ranker_mode="dpo"` is FULL's default again, now pointing at the
+    # promoted V2 checkpoint ONLY -- never the old V1 ranker.pt (Stage 7/
+    # 7.1/7.2A rejected checkpoints remain on disk as historical evidence,
+    # never loaded here). `use_learned_dpo` is computed from `ranker_mode`
+    # up front and drives both whether a checkpoint is even loaded and
+    # every downstream label, so a run can never accidentally read as
+    # deterministic-selector just because a checkpoint happened to be
+    # absent -- Section 11: any mismatch (missing file, wrong hash, wrong
+    # feature schema, missing normalization) HARD FAILS via
+    # agentic_raptor.ranking.model_v2.load_promoted_v2, never a silent
+    # downgrade to the deterministic selector.
+    use_learned_dpo = (ranker_mode in ("dpo", "dpo_gated"))
+    # STAGE 9B experimental: "dpo_gated" = DPO V2 + frozen confidence gate
+    # (margin < 0.4574 -> deterministic fallback). Opt-in only.
+    _dpo_threshold = 0.4574 if ranker_mode == "dpo_gated" else None
+    selector = "learned_dpo" if use_learned_dpo else "deterministic"
+    ranker = None
+    if use_learned_dpo:
+        from agentic_raptor.ranking.model_v2 import load_promoted_v2
+        # Section 7: candidate A's context is keyed ONLY by A's own
+        # canonical_graph_hash (and B's only by B's) -- PostSACRankerV2.
+        # score() cannot cross-read the other branch's trajectory, since
+        # each side looks up its own entry independently.
+        branch_context = {
+            da.canonical_graph_hash: {"candidate_row": sza["best"],
+                                      "branch_rows": sza["results"],
+                                      "family": da.topology_family},
+            db.canonical_graph_hash: {"candidate_row": szb["best"],
+                                      "branch_rows": szb["results"],
+                                      "family": db.topology_family},
+        }
+        ranker = load_promoted_v2(branch_context)
     arm = "dpo_ranker" if ranker else "explicit_baseline"
+
+    # STAGE 9B GATE REPAIR (2026-08-14): per-branch REAL sizing-time SPICE
+    # evidence. Stage 6 measured every sizing step with real NGSPICE; the
+    # returned design is the best of those steps, so "best over the run" IS
+    # the returned design's own demonstrated outcome. Pre-verification
+    # data (never the stage-9 authoritative call), honestly labeled as
+    # measurement -- not disguised as a prediction.
+    def _measured_evidence(sz):
+        from agentic_raptor.electrical.fom import compute_fom
+        from agentic_raptor.mb_sac.spec_sizing import postsizing_outcome
+        results = sz.get("results") or []
+        outs = [postsizing_outcome(r, spec) for r in results]
+        dists = [o["normalized_distance_to_feasibility"] for o in outs
+                 if o["normalized_distance_to_feasibility"] is not None]
+        # QUALITY POLISH (2026-08-17): best sizing-time FoM among PASSING
+        # steps -- real per-step SPICE, same evidence class as the gate's
+        # measured pass; used only as the both-passed tie-break
+        foms = [compute_fom(r.get("ugbw_hz"), r.get("c_load_f") or run_cl,
+                            r.get("idd_a")).get("fom_value")
+                for r, o in zip(results, outs) if o["exact_spec_pass"]]
+        foms = [f for f in foms if f is not None]
+        return {"n_measured": len(outs),
+                "exact_spec_pass": any(o["exact_spec_pass"] for o in outs),
+                "best_distance": min(dists) if dists else None,
+                "best_pass_fom": max(foms) if foms else None,
+                "source": "sizing_spice_stage6"}
+
+    ev_a, ev_b = _measured_evidence(sza), _measured_evidence(szb)
     decision = compare(da, db, pa, pb, spec=spec,
                        model=ranker,          # compare() calls model.score()
                        ranker_arm=arm,
                        ranker_checkpoint_hash=(ranker.checkpoint_hash
-                                               if ranker else None))
+                                               if ranker else None),
+                       # Stage 9B fix: this threshold was computed but never
+                       # passed -- the body's reference to it then raised
+                       # NameError inside the scoring try-block, silently
+                       # degrading EVERY Level-2 DPO decision to
+                       # "deterministic_tie". Now actually wired.
+                       dpo_margin_threshold=_dpo_threshold,
+                       measured_a=ev_a, measured_b=ev_b,
+                       gate_mode=gate_mode)
+    trace["arms"]["use_learned_dpo"] = use_learned_dpo
+    trace["arms"]["selector"] = selector
     trace["models"]["ranker"] = {
         "training_method": "DPO" if ranker else None,
         "frozen": True if ranker else None,
         "hash": ranker.checkpoint_hash if ranker else None,
-        "arm": arm}
+        "feature_schema": getattr(ranker, "feature_schema", None),
+        "arm": arm, "use_learned_dpo": use_learned_dpo, "selector": selector}
     trace["stage8_ranker"] = {
-        "ranker_arm": arm,
+        "ranker_arm": arm, "selector": selector, "use_learned_dpo": use_learned_dpo,
+        "feature_schema": getattr(ranker, "feature_schema", None),
         "input_count": 2,
         "both_sized": bool(da.sizing_vector) and bool(db.sizing_vector),
         "backup_design": decision["backup_design"],
@@ -816,6 +1322,13 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
         "ranker_error": decision.get("ranker_error"),
         "hard_safety_tier_A": decision.get("hard_safety_tier_A"),
         "hard_safety_tier_B": decision.get("hard_safety_tier_B"),
+        "gate_mode": decision.get("gate_mode"),
+        "measured_tier_A": decision.get("measured_tier_A"),
+        "measured_tier_B": decision.get("measured_tier_B"),
+        "measured_evidence_A": decision.get("measured_evidence_A"),
+        "measured_evidence_B": decision.get("measured_evidence_B"),
+        "dpo_gate_fallback": decision.get("dpo_gate_fallback"),
+        "dpo_scores_pregate": decision.get("dpo_scores_pregate"),
         "selected_topology_hash": decision["selected_topology_hash"],
         "backup_topology_hash": decision["backup_topology_hash"]}
 
@@ -872,6 +1385,58 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
                              "ugbw_hz": auth_bak.ugbw_hz,
                              "distance":
                              auth_bak.normalized_distance_to_feasibility}
+
+    # ---- AGENTIC: Recovery Agent (one bounded second shot) ----------------
+    # Runs ONLY on a failed verification, at most once, funded ONLY by
+    # calls the Supervisor/early-stop banked inside the same envelope
+    # (sizing from the bank; the fresh authoritative re-verify also costs
+    # one banked call). The recovered design replaces the answer ONLY if
+    # its own fresh authoritative measurement is strictly better.
+    _recovery_calls = 0
+    if (ag_state is not None and "recovery" in agents
+            and not oc_sel.get("exact_spec_pass")):
+        from agentic_raptor.agents import (recovery_decide, recovery_diagnose,
+                                           recovery_execute)
+        _sel_dist = auth_sel.normalized_distance_to_feasibility
+        ag_state.recovery_log["diagnosis"] = recovery_diagnose(
+            measured[sel_lbl], spec)
+        _decision = recovery_decide(ag_state, ag_state.ledger, _sel_dist)
+        _recovered = {}
+
+        def _resize(budget_r):
+            nonlocal _recovery_calls
+            bak_cand = sel["selected"]["AB".index(bak_lbl)] \
+                if isinstance(sel["selected"], list) else None
+            sizing_b = max(2, budget_r - 1)      # 1 banked call -> re-verify
+            t = _size_one_branch(
+                bak_lbl, bak_cand, spec, exe, sizing_b,
+                sizing_early_stop=True, sizing_repeats=1,
+                use_surrogate=use_surrogate,
+                use_sizing_ranker=use_sizing_ranker,
+                sizing_method=sizing_method, c_load_f=run_cl, seed_base=29)
+            designs["R"] = (t[0], t[4])
+            oc_r, auth_r = verify("R", "recovery_verification")
+            _recovered.update(design=t, oc=oc_r, auth=auth_r)
+            _recovery_calls = t[2]["spice_calls"] + 1
+            return {"distance": auth_r.normalized_distance_to_feasibility,
+                   "pass": bool(oc_r.get("exact_spec_pass")),
+                   "spice_calls": _recovery_calls}
+        recovery_execute(ag_state, ag_state.ledger, _decision, _resize)
+        if _recovered:
+            new_d = _recovered["auth"].normalized_distance_to_feasibility
+            better = (_recovered["oc"].get("exact_spec_pass")
+                      or (new_d is not None and _sel_dist is not None
+                          and new_d < _sel_dist))
+            ag_state.recovery_log["adopted"] = bool(better)
+            if better:
+                verified["R"] = _recovered["auth"]
+                measured["R"] = {
+                    "gain_db": _recovered["auth"].gain_db,
+                    "pm_deg": _recovered["auth"].pm_deg,
+                    "ugbw_hz": _recovered["auth"].ugbw_hz,
+                    "distance": new_d}
+                sel_lbl, oc_sel, auth_sel = "R", _recovered["oc"], _recovered["auth"]
+        trace["agent_recovery"] = ag_state.recovery_log
     trace["stage9_verification"] = {
         "authoritative_engine": "ngspice",
         "verified_designs": sorted(verified),
@@ -974,13 +1539,24 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
     # PVT calls are post-hoc robustness-evaluation cost, never counted as
     # cost required to FIND the nominal design.
     optimization_calls = da.sizing_spice_calls + db.sizing_spice_calls
-    final_verification_calls = len(verified)
+    # Recovery Agent spend (sizing calls funded from the banked envelope;
+    # its one fresh verification is inside len(verified) already since the
+    # recovered design enters `verified` under "R")
+    _rec_sizing = max(0, (_recovery_calls - 1)) if agents else 0
+    optimization_calls += _rec_sizing
+    # a recovery attempt that was NOT adopted still spent its one fresh
+    # verification call ("R" never entered `verified` in that case)
+    final_verification_calls = len(verified) + (
+        1 if _recovery_calls and "R" not in verified else 0)
     trace["spice_usage"] = {
         "optimization_spice_calls": optimization_calls,
         "final_nominal_verification_calls": final_verification_calls,
         "pvt_spice_calls": pvt_spice_calls,
+        "recovery_sizing_calls": _rec_sizing,
         "total_spice_calls": (optimization_calls + final_verification_calls
                               + pvt_spice_calls)}
+    if ag_state is not None:
+        trace["agents"] = {"enabled": list(agents), **ag_state.trace()}
 
     # ---- Stage 11: ranker training data (trusted only if both measured) ----
     # predictions are recorded too: the ranker trainer needs the FEATURES the
@@ -989,11 +1565,17 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
     # the ranker's training queue -- persist=False still computes and
     # returns status/ranker_correct/provenance for the trace below, it just
     # skips the trusted_pairs.jsonl/provisional_pairs.jsonl append.
+    # A9 CUSTODY FIX (2026-08-16): harvest=True means an EXTERNAL harvester
+    # (the A9 orchestrator) owns this run's training data -- it routes rows
+    # into its own generation-scoped streams. In that case the run must NOT
+    # also append to the global shared pools (trusted_pairs here; the LIVE
+    # stream files + RAG_MEMORY_V2 below), which would both double-count the
+    # data and mutate files other lineages/loops treat as frozen baselines.
     pair = record_pair(spec, da, db,
                        verified.get("A"), verified.get("B"),
                        pred_a=pa, pred_b=pb,
                        ranker_choice=sel_lbl,
-                       persist=(learning_mode == "adaptive"))
+                       persist=(learning_mode == "adaptive" and not harvest))
     # Each measured outcome must route back to the branch that produced it.
     # Asserted, not assumed: mis-routed feedback would train every component
     # on another branch's result and still look well-formed.
@@ -1097,7 +1679,22 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
                                    "reward": r.get("reward"),
                                    "pm_deg": r.get("pm_deg"),
                                    "gain_db": r.get("gain_db"),
-                                   "ugbw_hz": r.get("ugbw_hz")}
+                                   "ugbw_hz": r.get("ugbw_hz"),
+                                   # Stage 7.2B (Section 11): additive,
+                                   # logging-only fields -- sac_size()'s own
+                                   # `results` rows already carry these
+                                   # (measure()'s return dict), they were
+                                   # just never persisted into this stream.
+                                   # Does not change optimization behavior;
+                                   # only future pair-mining gains a richer
+                                   # feature schema (POST_SAC_FEATURES_V2)
+                                   # without approximating stability/op-
+                                   # validity for runs recorded from here on.
+                                   "idd_a": r.get("idd_a"),
+                                   "power_w": r.get("power_w"),
+                                   "stable": r.get("stable"),
+                                   "op_valid": r.get("op_valid"),
+                                   "stability": r.get("stability")}
                                   for r in sz["results"]]},
                       "authoritative": (
                           {f: getattr(verified[lbl], f) for f in
@@ -1148,20 +1745,28 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
         # mix pre- and post-repair rows; new writes go to a fresh directory.
         LIVE = ROOT / "artifacts/publication_v2/live_streams_post_cload_v1"
         counts = {}
-        for name, rows in streams.items():
-            if name == "ranker_pairs":
-                # record_pair() above is the proven mechanism for this one
-                # (it fixed the deployed checkpoint); routing the SAME pair
-                # through harvest_run's separate winner/loser computation
-                # too would create two parallel, possibly disagreeing
-                # sources of ranker training data for one measured outcome.
-                continue
-            path = (RAG_MEMORY_V2 if name == "rag_memory"
-                    else LIVE / f"{name}.jsonl")
-            counts[name] = append(path, rows)
-        trace["stage11_feedback"]["routed_to_streams"] = counts
         if harvest:
+            # A9 CUSTODY FIX (2026-08-16): the external harvester routes
+            # these rows into ITS generation-scoped streams; appending them
+            # to the global LIVE pools here too silently mutated shared
+            # baselines (measured: adaptive G0 grew RAG_MEMORY_V2 182->222
+            # while the orchestrator itself harvested nothing).
+            trace["stage11_feedback"]["routed_to_streams"] = {
+                "skipped": True, "reason": "external_harvest_custody"}
             trace["_harvest"] = hv
+        else:
+            for name, rows in streams.items():
+                if name == "ranker_pairs":
+                    # record_pair() above is the proven mechanism for this one
+                    # (it fixed the deployed checkpoint); routing the SAME pair
+                    # through harvest_run's separate winner/loser computation
+                    # too would create two parallel, possibly disagreeing
+                    # sources of ranker training data for one measured outcome.
+                    continue
+                path = (RAG_MEMORY_V2 if name == "rag_memory"
+                        else LIVE / f"{name}.jsonl")
+                counts[name] = append(path, rows)
+            trace["stage11_feedback"]["routed_to_streams"] = counts
     else:
         trace["stage11_feedback"]["routed_to_streams"] = {
             "skipped": True, "reason": f"learning_mode={learning_mode!r}"}

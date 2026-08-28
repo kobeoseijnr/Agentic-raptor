@@ -144,13 +144,17 @@ def proposal_dict_valid(obj: dict) -> tuple[bool, list[str]]:
     _al = _ROOT / "artifacts" / "variant_verification" / "ALLOWLIST.json"
     if not reasons and _al.is_file():
         allow = {(len(a["stages"]) if isinstance(a["stages"], list) else a["stages"],
-                  a["comp"], a["buffer"], a["fb"])
+                  a["comp"], a["buffer"], a["fb"],
+                  bool(a.get("cascode", False)), bool(a.get("class_ab", False)))
                  for a in json.loads(_al.read_text())["allow_list"]}
         comp_list = _fields("compensation")
         comp = (comp_list[0].get("type", "none") if comp_list else "none")
         comp = {"miller_cap": "miller", "rc_nulling": "rc"}.get(comp, comp)
+        from agentic_raptor.llm_dpo.stage3e4 import tier2_flags
+        cas, ab = tier2_flags(obj)
         combo = (len(obj.get("stages", [])), comp,
-                 bool(obj.get("output_buffer")), bool(obj.get("local_feedback")))
+                 bool(obj.get("output_buffer")), bool(obj.get("local_feedback")),
+                 cas, ab)
         if combo not in allow:
             reasons.append(f"combo_not_electrically_verified:{combo}")
     return not reasons, reasons

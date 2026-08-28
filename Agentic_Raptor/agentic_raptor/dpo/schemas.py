@@ -8,7 +8,7 @@ are used only for DPO *training*.
 
 from __future__ import annotations
 
-import uuid
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -99,8 +99,27 @@ def build_candidate_features(candidate: Any, **kwargs: Any) -> CandidateFeatures
     spec = candidate.specifications
     graph = candidate.topology
     validation = candidate.validation_result or {}
+    # DETERMINISM REPAIR (2026-08-15): pool_candidate_id was uuid4 -- pure
+    # per-object randomness. DPORanker.rank() breaks score ties on this id,
+    # so with tied scores the WINNING CANDIDATE was a lottery: measured to
+    # make sac_size non-reproducible at a fixed seed (the long-documented
+    # "three identical calls, three different UGBWs"), which in turn put an
+    # arm-order-dependent luck floor under every ablation comparison (the
+    # GATE2 "RAG negative" signal replayed as exactly this: identical
+    # proposal sets, identical topology pairs, divergent sizing). The id is
+    # now a CONTENT hash: same candidate -> same id in every process, and
+    # the tie-break is stable. Two byte-identical candidates in one pool
+    # share an id; sorted() is stable, so order stays deterministic.
+    sizing_vec = [float(x) for x in kwargs.get("sizing_vector", [])]
+    _id_src = "|".join([
+        graph.structural_hash(),
+        ",".join(f"{x:.9g}" for x in sizing_vec),
+        ",".join(f"{k}:{float(v):.9g}" for k, v in
+                 sorted(kwargs.get("predicted_margins", {}).items())),
+        f"{float(kwargs.get('remaining_budget_frac', 0.0)):.9g}",
+    ])
     return CandidateFeatures(
-        pool_candidate_id=f"pool-{uuid.uuid4().hex[:10]}",
+        pool_candidate_id=f"pool-{hashlib.sha256(_id_src.encode()).hexdigest()[:10]}",
         specifications=spec.to_dict(),
         spec_embedding=spec_embedding(spec),
         topology=graph.to_dict(),

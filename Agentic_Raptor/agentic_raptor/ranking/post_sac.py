@@ -46,6 +46,22 @@ PROVISIONAL = QUEUE / "provisional_pairs_post_cload_v1.jsonl"
 STABLE_P = 0.75
 UNSTABLE_P = 0.25
 
+#: STAGE 9B GATE REPAIR: measured-distance indifference band. Two branches
+#: whose demonstrated (real-SPICE) best distances differ by less than this
+#: are a genuine close call and go to the learned ranker instead of being
+#: decided by a sub-band measurement difference. Predeclared, not tuned:
+#: 0.05 is the same low-confidence margin compare() already uses.
+MEASURED_DIST_BAND = 0.05
+
+
+def _measured_tier(ev: dict | None) -> int:
+    """Tri-state over REAL sizing-time evidence: 0 = measured full-spec
+    pass, 1 = no measurements (unknown never ranks as good), 2 = measured
+    but never passed within budget."""
+    if not ev or not ev.get("n_measured"):
+        return 1
+    return 0 if ev.get("exact_spec_pass") else 2
+
 
 class RankerInputError(ValueError):
     """The ranker was handed something other than two sized designs."""
@@ -116,8 +132,28 @@ def hard_safety_tier(pred: SurrogatePrediction) -> tuple:
 def compare(a: PostSACDesign, b: PostSACDesign,
             pred_a: SurrogatePrediction, pred_b: SurrogatePrediction,
             spec: dict, model=None, ranker_arm: str = "dpo_ranker",
-            ranker_checkpoint_hash: str | None = None) -> dict:
-    """Select exactly one of two SIZED designs."""
+            ranker_checkpoint_hash: str | None = None,
+            dpo_margin_threshold: float | None = None,
+            measured_a: dict | None = None, measured_b: dict | None = None,
+            gate_mode: str = "surrogate") -> dict:
+    """Select exactly one of two SIZED designs.
+
+    `dpo_margin_threshold` (STAGE 9B, opt-in): learned-score margins below
+    it fall back to the deterministic selector. NOTE 2026-08-14: this
+    parameter existed only in the body, not the signature -- every model
+    scoring raised NameError, was swallowed by the except, and silently
+    became "deterministic_tie". Fixed here; regression-tested.
+
+    `gate_mode="measured_first"` (STAGE 9B GATE REPAIR, opt-in): REAL
+    sizing-time SPICE evidence (measured_a/measured_b, produced by stage
+    6's own NGSPICE calls -- pre-verification data, same provenance class
+    the DPO features already use) outranks the run-local surrogate's
+    opinion. Measured F0-F3 basis: the surrogate-driven gate decided
+    12/12 runs and chose the authoritative-worse branch in 6/8
+    both-verified decisions, including discarding a branch whose real
+    sizing pass it predicted as unstable (PM -9.3 predicted vs 58.9
+    measured). Default "surrogate" = byte-identical live behavior.
+    """
     for d in (a, b):
         if not d.sizing_vector:
             raise RankerInputError(
@@ -137,11 +173,58 @@ def compare(a: PostSACDesign, b: PostSACDesign,
     out = {"hard_safety_tier_A": ta, "hard_safety_tier_B": tb,
            "ranker_arm": ranker_arm,
            "ranker_checkpoint_hash": ranker_checkpoint_hash,
+           "gate_mode": gate_mode,
+           "measured_evidence_A": measured_a, "measured_evidence_B": measured_b,
            "ranker_score_A": None, "ranker_score_B": None,
            "score_margin": None, "ranker_error": None}
 
+    # ---- Level 0 (opt-in): measured-evidence gate -------------------------
+    # Real stage-6 SPICE measurements of each branch's own sized design.
+    # A measured full-spec pass is a FACT; the surrogate's stability
+    # opinion must never veto it. Within "both measured, neither passed",
+    # the branches' demonstrated best distances are compared with an
+    # indifference band -- close calls go to the learned ranker, which is
+    # exactly the regime a learned model is for.
+    skip_surrogate_gate = False
+    if gate_mode == "measured_first":
+        ea, eb = _measured_tier(measured_a), _measured_tier(measured_b)
+        out["measured_tier_A"], out["measured_tier_B"] = ea, eb
+        if ea != eb:
+            winner = a if ea < eb else b
+            out.update(decision_basis="measured_evidence_gate",
+                       deciding_level="measured_spec_pass",
+                       low_confidence=False)
+            return _finish(out, winner, b if winner is a else a)
+        if ea == 0:
+            # both proved a real full-spec pass: safety is settled by
+            # measurement. QUALITY POLISH (2026-08-17): when both carry a
+            # measured sizing-time FoM and they differ meaningfully (>5%),
+            # the higher-FoM design wins on measured evidence; genuine
+            # near-ties still go to the learned ranker.
+            fa = (measured_a or {}).get("best_pass_fom")
+            fb = (measured_b or {}).get("best_pass_fom")
+            if fa is not None and fb is not None and fa > 0 and fb > 0                     and abs(fa - fb) / max(fa, fb) > 0.05:
+                winner = a if fa > fb else b
+                out.update(decision_basis="measured_fom_gate",
+                           deciding_level="measured_pass_fom",
+                           low_confidence=False)
+                return _finish(out, winner, b if winner is a else a)
+            skip_surrogate_gate = True
+        elif ea == 2:
+            da_ = (measured_a or {}).get("best_distance")
+            db_ = (measured_b or {}).get("best_distance")
+            if (da_ is not None and db_ is not None
+                    and abs(da_ - db_) > MEASURED_DIST_BAND):
+                winner = a if da_ < db_ else b
+                out.update(decision_basis="measured_distance_gate",
+                           deciding_level="measured_distance",
+                           low_confidence=False)
+                return _finish(out, winner, b if winner is a else a)
+            skip_surrogate_gate = da_ is not None and db_ is not None
+        # ea == eb == 1 (no measurements at all): surrogate gate applies
+
     # ---- Level 1: hard safety gate ----------------------------------------
-    if ta != tb:
+    if not skip_surrogate_gate and ta != tb:
         winner = a if ta < tb else b
         out.update(decision_basis="hard_safety_gate",
                    deciding_level=_first_diff(ta, tb),
@@ -159,6 +242,20 @@ def compare(a: PostSACDesign, b: PostSACDesign,
             sa = float(model.score(spec, a, pred_a))
             sb = float(model.score(spec, b, pred_b))
             basis = "dpo_ranker"
+            # STAGE 9B (2026-08-14) DPO_CONFIDENCE_GATE, opt-in: when the
+            # learned scores are closer than `dpo_margin_threshold`, the
+            # decision falls back to the frozen deterministic selector.
+            # Calibrated on Stage-7.2B TRAIN pairs only (threshold 0.4574 =
+            # first TRAIN margin quartile, the region where DPO measured
+            # 60.6% -- below the deterministic 74.66%); frozen DEV
+            # validation: gated 86.4% vs ungated 80.7%. None (default) =
+            # byte-identical live behavior.
+            if (dpo_margin_threshold is not None
+                    and abs(sa - sb) < dpo_margin_threshold):
+                out["dpo_gate_fallback"] = True
+                out["dpo_scores_pregate"] = [sa, sb]
+                sa, sb = _deterministic_score(pred_a), _deterministic_score(pred_b)
+                basis = "dpo_low_confidence_deterministic_fallback"
         except Exception as exc:      # never silently return 0.0
             log.error("post-SAC ranker failed on %s: %s",
                       a.spec_id, exc, exc_info=True)

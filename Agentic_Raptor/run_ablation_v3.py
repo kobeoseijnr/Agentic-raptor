@@ -28,6 +28,15 @@ ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "artifacts/publication_v3/ablation_v3"
 DEFAULT_ADAPTER = ROOT / "artifacts/publication_v2/proposer_repair/sft_adapter_diverse"
 
+#: AGENTIC ARM (2026-08-16, user decision: fold AG_FULL into the component
+#: campaign instead of a separate 6-arm agentic study). AG_FULL = A0's exact
+#: configuration + all four agents (Design Planner, Topology Critic,
+#: Optimization Supervisor, Recovery Agent). The BudgetLedger caps its spend
+#: at A0's own envelope, so the comparison stays compute-fair by
+#: construction. Opt-in via --arms ...,AG_FULL; never part of the frozen
+#: A0-A8 suite definition (their config hashes are untouched).
+AGENTIC_ARMS = {"AG_FULL": ("planner", "critic", "supervisor", "recovery")}
+
 
 def _proposer_requirement(cfg) -> str:
     """"none" (A1: never touches the LLM) | "base" (A3) | "sft" (everyone else)."""
@@ -80,16 +89,41 @@ def main():
     ap.add_argument("--paper-mode", action="store_true",
                     help="run the full preflight check first and REFUSE to "
                          "execute anything if a blocker is found")
+    ap.add_argument("--tag", default="",
+                    help="optional campaign tag appended to every trace "
+                         "out_prefix (e.g. GATE2 -> ABLv3GATE2_...) so a "
+                         "re-campaign never overwrites a previous "
+                         "campaign's trace files; default '' is "
+                         "byte-identical to historical naming")
     args = ap.parse_args()
 
     if args.rag_memory is None:
         from agentic_raptor.publication.preflight import CLEAN_RAG_PATH
         args.rag_memory = str(CLEAN_RAG_PATH)
 
-    arms = [a for a in args.arms.split(",") if a in COMPONENT_ABLATIONS]
+    # BLINDTEST SEAL (2026-08-17): the 28 blindtest specs are evaluated
+    # EXACTLY ONCE, at paper time, never for tuning or debugging. A seal
+    # file records the first campaign that consumed them; any later attempt
+    # is refused -- the only override is deleting the seal by hand, which
+    # is a deliberate, visible act (and must be disclosed in the paper).
+    BLIND_SEAL = OUT / "BLINDTEST_SEAL.json"
+    if args.split == "blindtest":
+        if BLIND_SEAL.is_file():
+            prior = json.loads(BLIND_SEAL.read_text(encoding="utf-8"))
+            raise SystemExit(
+                "BLINDTEST ALREADY CONSUMED on "
+                f"{prior.get('consumed_at')} (results {prior.get('results')}). "
+                "The one-shot final evaluation may not be re-run. Delete "
+                f"{BLIND_SEAL} ONLY if you intend to disclose a second run.")
+        if not args.paper_mode:
+            raise SystemExit("blindtest requires --paper-mode (full preflight); "
+                             "it is the sealed final evaluation, not a dev run")
+
+    arms = [a for a in args.arms.split(",")
+            if a in COMPONENT_ABLATIONS or a in AGENTIC_ARMS]
     if not arms:
         raise SystemExit(f"no valid arms in {args.arms!r}; choose from "
-                         f"{sorted(COMPONENT_ABLATIONS)}")
+                         f"{sorted(COMPONENT_ABLATIONS) + sorted(AGENTIC_ARMS)}")
     seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
     idxs = [args.start + i * args.step for i in range(args.specs)]
     registry = build_registry()
@@ -101,6 +135,12 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     results_path = OUT / f"results_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
     errors_path = OUT / "errors.log"
+    if args.split == "blindtest":
+        BLIND_SEAL.write_text(json.dumps({
+            "consumed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "results": str(results_path), "arms": arms, "specs": idxs,
+            "seeds": seeds, "tag": args.tag}, indent=1), encoding="utf-8")
+        print(f"BLINDTEST SEAL written: {BLIND_SEAL}", flush=True)
 
     import run_raptor_v2 as v2
     from run_qwen_ablation import _load
@@ -108,9 +148,13 @@ def main():
     # Group requested arms by which proposer they need, so a 4B model is
     # loaded AT MOST TWICE (base + SFT) regardless of how many arms run,
     # and never at all if every requested arm is A1 (no LLM).
+    def _cfg_of(aid):
+        # AG_FULL runs A0's exact frozen configuration + the four agents
+        return COMPONENT_ABLATIONS["A0" if aid in AGENTIC_ARMS else aid]
+
     groups: dict[str, list[str]] = {}
     for aid in arms:
-        groups.setdefault(_proposer_requirement(COMPONENT_ABLATIONS[aid]), []).append(aid)
+        groups.setdefault(_proposer_requirement(_cfg_of(aid)), []).append(aid)
 
     total = len(arms) * len(idxs) * len(seeds)
     print(f"arms  : {arms}")
@@ -154,16 +198,29 @@ def main():
                 for idx in idxs:
                     for aid in group_arms:
                         n += 1
-                        cfg = COMPONENT_ABLATIONS[aid]
+                        cfg = _cfg_of(aid)
                         kwargs = cfg.to_run_pipeline_kwargs()
                         budget = kwargs.pop("budget")
+                        if aid in AGENTIC_ARMS:
+                            kwargs["agents"] = AGENTIC_ARMS[aid]
+                            # ADAPTIVE ATTEMPTS (2026-08-17): the agentic
+                            # arm stops the LLM hunt after 2 consecutive
+                            # attempts add nothing new (the Critic already
+                            # governs adequacy). Frozen A0-A8 keep the
+                            # historical fixed 20-attempt behavior.
+                            # 2026-08-18: stall_stop=2 truncated the diversity
+                            # ladder on the tier-2 proposer (gate: 2 families
+                            # vs 5 with the full ladder) -- proposals now use
+                            # the SAME full ladder as every other arm; AG's
+                            # runtime win comes from SPICE banking, not here.
+                            kwargs["proposal_stall_stop"] = None
                         spec_h = (lookup_spec(args.split, idx, registry) or {}).get("spec_hash")
                         t0 = time.time()
                         try:
                             tr = v2.run_pipeline(
                                 model, tok, adapter_str, split=args.split,
                                 spec_index=idx, budget=budget, seed=seed,
-                                out_prefix=f"ABLv3_{aid}_s{seed}",
+                                out_prefix=f"ABLv3{args.tag}_{aid}_s{seed}",
                                 pvt_config=pvt_cfg, rag_memory=args.rag_memory,
                                 **kwargs)
                             row = build_result_record(
@@ -171,6 +228,12 @@ def main():
                                 experiment_id=f"{aid}_{args.split}_{idx}_{seed}",
                                 pipeline_seed=seed, spec_index=idx,
                                 spec_hash=spec_h)
+                            if aid in AGENTIC_ARMS:
+                                # the record was built from A0's config --
+                                # relabel so analysis never conflates them
+                                row["ablation_id"] = aid
+                                row["ablation_name"] = "AGENTIC_FULL"
+                                row["agents"] = list(AGENTIC_ARMS[aid])
                             # Stage 1.5: paper mode must hard-fail on an
                             # UNEXPLAINED requested-vs-simulated C_LOAD
                             # mismatch (an explicit, reasoned override is

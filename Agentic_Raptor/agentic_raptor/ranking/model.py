@@ -45,6 +45,18 @@ FEATURE_NAMES = (
 )
 FEATURE_DIM = len(FEATURE_NAMES)
 
+#: Stage 7.1 (Section 9) normalization audit: real trusted-pair data shows
+#: `uncertainty` std ~0.017 vs `margin_gain` std ~1.57 -- roughly a 100x
+#: scale gap, which L2 weight_decay actively fights (matching a small-scale
+#: feature's influence needs proportionally larger weights, exactly what
+#: weight_decay penalizes). Continuous, scale-heterogeneous features are
+#: standardized (train-only mean/std); counts and binary presence flags are
+#: left alone -- z-scoring a 0/1 indicator or a small integer count doesn't
+#: correct a scale mismatch, it just relabels the same two states.
+NORMALIZE_MASK = tuple(n in ("worst_violation", "uncertainty", "stability_p",
+                             "margin_gain", "margin_pm", "margin_ugbw")
+                       for n in FEATURE_NAMES)
+
 
 def features(spec: dict, pred: SurrogatePrediction) -> list:
     """Feature vector for ONE design. Surrogate-only, never authoritative."""
@@ -68,6 +80,24 @@ def features(spec: dict, pred: SurrogatePrediction) -> list:
     ]
 
 
+def fit_normalization(feature_rows: list) -> tuple:
+    """Train-ONLY mean/std over NORMALIZE_MASK positions; identity (0/1)
+    elsewhere. `feature_rows` must be TRAIN-split feature vectors only --
+    fitting on dev/held-out rows would leak their distribution into the
+    checkpoint."""
+    import statistics as st
+    n = FEATURE_DIM
+    mean = [0.0] * n
+    std = [1.0] * n
+    for i in range(n):
+        if not NORMALIZE_MASK[i]:
+            continue
+        col = [row[i] for row in feature_rows]
+        mean[i] = st.mean(col) if col else 0.0
+        std[i] = (st.pstdev(col) if len(col) > 1 else 1.0) or 1.0
+    return mean, std
+
+
 class PostSACRanker:
     """Scores a sized design. Higher is better.
 
@@ -76,9 +106,20 @@ class PostSACRanker:
     every feature must come from the prediction.
     """
 
-    def __init__(self, model=None, checkpoint_hash: str | None = None):
+    def __init__(self, model=None, checkpoint_hash: str | None = None,
+                feature_mean: list | None = None,
+                feature_std: list | None = None):
         self.model = model
         self.checkpoint_hash = checkpoint_hash
+        # Stage 7.1 (Section 9): OPTIONAL train-only-fit standardization.
+        # None on both means "no normalization" -- the exact behaviour every
+        # checkpoint saved before this repair already has, so loading an old
+        # .pt file (no sidecar) is bit-for-bit unchanged. A checkpoint that
+        # DOES ship normalization stats gets them applied identically at
+        # train and inference time; nothing here can invent a mismatch,
+        # because both paths route through the same `_normalize`.
+        self.feature_mean = feature_mean
+        self.feature_std = feature_std
 
     @staticmethod
     def build():
@@ -86,6 +127,11 @@ class PostSACRanker:
         return torch.nn.Sequential(
             torch.nn.Linear(FEATURE_DIM, 32), torch.nn.ReLU(),
             torch.nn.Linear(32, 1))
+
+    @staticmethod
+    def normalization_path(checkpoint_path) -> Path:
+        p = Path(checkpoint_path)
+        return p.with_name(p.stem + "_normalization.json")
 
     @classmethod
     def load(cls, path=None) -> "PostSACRanker | None":
@@ -104,12 +150,30 @@ class PostSACRanker:
             net.eval()
             for q in net.parameters():
                 q.requires_grad_(False)
-            return cls(net, checkpoint_sha256(p))
+            mean = std = None
+            norm_path = cls.normalization_path(p)
+            if norm_path.is_file():
+                import json
+                stats = json.loads(norm_path.read_text(encoding="utf-8"))
+                mean, std = stats["feature_mean"], stats["feature_std"]
+            return cls(net, checkpoint_sha256(p), feature_mean=mean, feature_std=std)
         except Exception:
             return None
+
+    def _normalize(self, x):
+        import torch
+        if self.feature_mean is None or self.feature_std is None:
+            return x
+        # mean/std are pre-zeroed/one'd at the unmasked positions by
+        # fit_normalization() below, so this is a no-op there and a
+        # standard z-score on the masked (continuous) features.
+        mean = torch.tensor(self.feature_mean, dtype=torch.float32)
+        std = torch.tensor(self.feature_std, dtype=torch.float32).clamp(min=1e-6)
+        return (x - mean) / std
 
     def score(self, spec: dict, design, pred: SurrogatePrediction) -> float:
         import torch
         x = torch.tensor([features(spec, pred)], dtype=torch.float32)
+        x = self._normalize(x)
         with torch.no_grad():
             return float(self.model(x)[0, 0])

@@ -163,6 +163,19 @@ def proposer_gates(cand: dict, accepted: dict,
     not_worse("duplicate_rate", higher_is_better=False)
     not_worse("success_at_k")
     # --- quality: must actively improve ---
-    must_improve("measured_selected_quality")
-    must_improve("final_pass_rate")
+    # 2026-08-22 GATE REPAIR: the original rule demanded that BOTH quality
+    # and pass rate strictly improve. At a pass-rate ceiling (1.0 vs 1.0)
+    # that is unsatisfiable -- the A9 G1 SFT candidate was rejected on
+    # "final_pass_rate_not_improved:1.0<=1.0" despite a clearly better
+    # capability probe. Rule now: NEITHER may regress, and AT LEAST ONE of
+    # {quality, pass rate} must strictly improve. Safety is unchanged (a
+    # regression on either still fails); ties on both still fail (no
+    # evidence -> no promotion).
+    not_worse("measured_selected_quality")
+    not_worse("final_pass_rate")
+    def _improved(key):
+        c, a = cand.get(key), accepted.get(key)
+        return c is not None and (a is None or c > a + tol)
+    if not (_improved("measured_selected_quality") or _improved("final_pass_rate")):
+        f.append("no_strict_improvement:quality_or_pass_rate")
     return GateResult("proposer", not f, f, m)

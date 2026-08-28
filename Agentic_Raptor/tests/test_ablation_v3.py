@@ -35,15 +35,25 @@ def _real_graph():
 
 # =============================== A0-A9 configs ===================================
 def test_a0_full_enables_every_component():
+    """Stage 8 (2026-08-12, second deployment): A0_FULL carries the learned
+    DPO ranker again -- Stage 7.2B re-justified it (POST_SAC_FEATURES_V2,
+    DPO_REJUSTIFIED: 77.80% vs the deterministic selector's 74.66%
+    run-grouped DEV ranker-authority accuracy, 77 wins/45 losses/0
+    catastrophic errors), reversing Stage 7.1's earlier
+    LEARNED_DPO_NOT_JUSTIFIED finding. The hard safety gate itself is
+    untouched and still applies ahead of the learned ranker (see
+    test_a8_hard_safety_gate_still_applies_without_dpo)."""
     from agentic_raptor.publication.ablation_v3 import A0_FULL
     kw = A0_FULL.to_run_pipeline_kwargs()
     assert kw["use_llm"] and kw["use_rag"]
     assert A0_FULL.use_sft
     assert kw["conditioning"] == "exclusion"
-    assert kw["search"] == "one_root"
+    assert kw["search"] == "bandit_top2"  # 2026-08-15: bandit replaces AlphaZero as FULL selector
     assert kw["sizing_method"] == "sac"
     assert kw["use_surrogate"] and kw["use_sizing_ranker"]
     assert kw["ranker_mode"] == "dpo"
+    assert A0_FULL.use_dpo is True
+    assert A0_FULL.retired is False
 
 
 def test_a1_config_disables_only_llm():
@@ -228,11 +238,15 @@ def test_a7_sac_without_surrogate_still_uses_real_spice_every_step(tmp_path):
 
 
 # =============================== A8 baseline ranker ===============================
-def test_a8_config_disables_only_dpo():
+def test_a8_config_is_meaningful_again_and_un_retired():
+    """Stage 8 (second deployment): A8 is un-retired -- now that A0/FULL
+    carries a re-justified learned DPO (Stage 7.2B), A8 once again removes
+    something real: the ONLY kwarg difference from A0 is ranker_mode."""
     from agentic_raptor.publication.ablation_v3 import A0_FULL, A8_NO_DPO
     kw0, kw8 = A0_FULL.to_run_pipeline_kwargs(), A8_NO_DPO.to_run_pipeline_kwargs()
     assert {k for k in kw0 if kw0[k] != kw8[k]} == {"ranker_mode"}
-    assert kw8["ranker_mode"] == "baseline"
+    assert kw8["ranker_mode"] == "deterministic"
+    assert A8_NO_DPO.retired is False
 
 
 def test_a8_hard_safety_gate_still_applies_without_dpo():

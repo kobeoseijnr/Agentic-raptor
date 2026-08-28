@@ -190,6 +190,66 @@ def action_space_manifest() -> dict:
 RZ_MIN, RZ_MAX = 100.0, 500e3
 
 
+def encode_action(knobs, lo, hi):
+    """Inverse of the decode used everywhere a policy/replay action becomes
+    physical knobs (``knobs = lo + (a+1)/2*(hi-lo)``).
+
+    Stage 6.1 repair: two scripted phases inside ``sac_size`` (the nominal
+    anchor at step 0, and the exploitation-tail perturbations) choose a
+    physical knob vector directly and then stored ``action = zeros`` for
+    replay -- but ``decode(zeros)`` is the MIDPOINT of each knob's range
+    (e.g. s1_w in [0.5, 4.0] decodes to 2.25x, not the 1.0x nominal point
+    that was actually applied), so the stored (s, a, r, s') tuple did not
+    correspond to the action that produced r and s'. This is the exact
+    inverse transform, used to derive the CORRECT normalized action for any
+    physical knob vector chosen outside the actor, instead of fabricating a
+    zero placeholder.
+
+    No inward epsilon margin: unlike the actor's own tanh(z) output (which
+    approaches +-1 only in the limit), a caller here always passes an
+    already-clamped knob vector, so `a` is exactly within [-1, 1] by
+    construction. These stored actions are only ever re-decoded with the
+    same linear formula (never passed through atanh), so there is nothing
+    to protect against by shrinking them -- doing so previously introduced
+    a real, scale-dependent roundtrip error (e.g. ~0.1 physical units on
+    cap_x's ~2048-wide range from a mere 1e-4 inward nudge).
+    """
+    import torch
+    lo_t = lo if torch.is_tensor(lo) else torch.tensor(lo)
+    hi_t = hi if torch.is_tensor(hi) else torch.tensor(hi)
+    knobs_t = knobs if torch.is_tensor(knobs) else torch.tensor(knobs)
+    a = 2 * (knobs_t - lo_t) / (hi_t - lo_t) - 1
+    return a.clamp(-1.0, 1.0)
+
+
+def assert_action_roundtrips_to_knobs(action, knobs, lo, hi,
+                                      tol: float = 1e-3) -> float:
+    """Hard invariant (Stage 6.1, Section 5): every SAC replay transition's
+    stored action must decode back to the physical knob vector that was
+    actually applied. ``tol`` is a FRACTION of each knob's own [lo, hi]
+    range (not an absolute physical unit) -- knob scales span 0.1..2048
+    across the 7 knobs, so a single absolute tolerance would be meaningless
+    for most of them and falsely strict for the widest ones. Raises
+    ValueError with the concrete mismatch if violated; otherwise returns the
+    max relative error so callers can track it."""
+    import torch
+    lo_t = lo if torch.is_tensor(lo) else torch.tensor(lo)
+    hi_t = hi if torch.is_tensor(hi) else torch.tensor(hi)
+    a_t = action if torch.is_tensor(action) else torch.tensor(action)
+    knobs_t = knobs if torch.is_tensor(knobs) else torch.tensor(knobs)
+    decoded = lo_t + (a_t + 1) / 2 * (hi_t - lo_t)
+    span = (hi_t - lo_t).clamp(min=1e-9)
+    rel_err = ((decoded - knobs_t).abs() / span).max().item()
+    if rel_err > tol:
+        abs_err = (decoded - knobs_t).abs()
+        raise ValueError(
+            "SAC replay invariant violated: decoded(stored action) does not "
+            f"reproduce the applied knobs (max relative error {rel_err:.6f} "
+            f"> tol {tol}). decoded={decoded.tolist()} "
+            f"applied={knobs_t.tolist()} abs_err={abs_err.tolist()}")
+    return rel_err
+
+
 def apply_knobs(graph, knobs: list) -> object:
     """Return a deep-copied device graph with the sizing knobs applied.
 
@@ -615,6 +675,11 @@ def _offline_pretrain(actor, q1, q2, opt_a, opt_c, obs, spec, family,
 def sac_size(topology_id: str, graph, spec: dict, exe, out_dir: Path, costs,
              budget: int = 16, seed: int = 0, reward_fn=None,
              ranker=None, family: str | None = None,
+             early_stop_on_pass: bool = False,
+             select_by: str = "reward",
+             exploit_when_close: float | None = None,
+             fom_plateau_patience: int | None = None,
+             tail_anchor_budget: int | None = None,
              persist: bool = True, use_surrogate: bool = True,
              use_ranker: bool = True,
              ranker_spec_conditioned: bool = True,
@@ -659,6 +724,13 @@ def sac_size(topology_id: str, graph, spec: dict, exe, out_dir: Path, costs,
                              torch.nn.ReLU(), torch.nn.Linear(48, 1))
     q2 = torch.nn.Sequential(torch.nn.Linear(OBS_DIM + N_KNOBS, 48),
                              torch.nn.ReLU(), torch.nn.Linear(48, 1))
+    # Stage 6 audit (2026-08-12): purely additive instrumentation -- proves
+    # (rather than merely asserts) that the actor/critic parameters this
+    # call trains are not a no-op. Checksummed BEFORE any warm-start load/
+    # pretrain/real update touches them.
+    from agentic_raptor.topology_rl.trainer import parameter_checksum
+    actor_checksum_initial = parameter_checksum(actor)
+    critic_checksum_initial = parameter_checksum(q1) + parameter_checksum(q2)
     import copy
     # Polyak-averaged target critics: the bootstrapped target must not chase
     # the same weights it trains, or the regression diverges
@@ -730,6 +802,13 @@ def sac_size(topology_id: str, graph, spec: dict, exe, out_dir: Path, costs,
     results, transitions = [], []
     best_close = 0.0        # progress term (running max -> plateaus)
     last_mv = None          # per-constraint shortfalls (move every step)
+    # Stage 6.1 repair bookkeeping: every transition's action must decode
+    # back to the knobs actually applied (see encode_action /
+    # assert_action_roundtrips_to_knobs above); track provenance + the
+    # worst observed roundtrip error for reporting.
+    n_nominal_anchor_transitions = 0
+    n_exploitation_tail_transitions = 0
+    max_action_roundtrip_error = 0.0
 
     def _obs(step_i, close, mv):
         dyn = ([close] + _margin_feats(mv)) if sequential else [0.0, 0, 0, 0]
@@ -757,12 +836,46 @@ def sac_size(topology_id: str, graph, spec: dict, exe, out_dir: Path, costs,
                                        pred, (budget - step) / budget)
             feats.metadata["i"] = k
             batch.append((a.detach(), knobs, feats))
+        step_source = "ranker" if use_ranker else "unranked"
         if step == 0:
             # the nominal point is always measured first: 'best' can never be
-            # worse than no sizing, and the search starts from a real anchor
-            a_t = torch.zeros(N_KNOBS)
+            # worse than no sizing, and the search starts from a real anchor.
+            # Stage 6.1: this action is NOT produced by the actor, but it IS
+            # a real environment interaction with a well-defined knob vector
+            # (all-ones -- every knob within [lo, hi]), so it is treated as a
+            # genuine, off-policy-valid SAC transition (Option A) -- the
+            # normalized action is DERIVED from the knobs actually applied,
+            # never fabricated as zero (decode(0) is each knob's midpoint,
+            # not 1.0x nominal).
             knobs = torch.ones(N_KNOBS)
-        elif step >= budget - max(2, budget // 3) and results:
+            a_t = encode_action(knobs, lo, hi)
+            step_source = "nominal_anchor"
+            n_nominal_anchor_transitions += 1
+        elif results and (step >= budget - max(2, budget // 3)
+                          # BUDGET-ANCHORED TAIL (v4.4, 2026-08-21, opt-in):
+                          # SAC refines in its last third; a 61-call committed
+                          # run therefore explores PAST the sweet spot a
+                          # 32-call baseline run refines into (measured: AG
+                          # committed to the RIGHT branch on specs 3/6/15 yet
+                          # scored 1.4-2.2x below A0's shorter run, same seed).
+                          # With tail_anchor_budget=B the run ALSO refines
+                          # where the B-call baseline would (steps in the
+                          # last third of B), then explores on, then refines
+                          # again in its own final third -- a superset of the
+                          # baseline's refinement schedule.
+                          or (tail_anchor_budget is not None
+                              and tail_anchor_budget - max(2, tail_anchor_budget // 3)
+                                  <= step < tail_anchor_budget)
+                          or (exploit_when_close is not None
+                              and min((postsizing_outcome(r, spec)
+                                       ["normalized_distance_to_feasibility"] or 9.9)
+                                      for r in results) < exploit_when_close)):
+            # CLOSE-THE-GAP (2026-08-19, opt-in via exploit_when_close): the
+            # measured SAC trajectory on 4-stage circuits reached distance
+            # 0.02 at call 7, then EXPLORED away (0.81, 1.75) for 15 calls
+            # before passing at call 29. When a near-miss exists, switch to
+            # SAC's OWN exploitation tail (anchor perturbation) early. Same
+            # knobs, same bounds -- only the explore/exploit schedule moves.
             # EXPLOITATION tail: small perturbations alternating between TWO
             # anchors — the best-reward point and the closest-to-feasibility
             # point. Refining only the reward incumbent chases gain-heavy
@@ -777,7 +890,13 @@ def sac_size(topology_id: str, graph, spec: dict, exe, out_dir: Path, costs,
             bb = anchors[step % len(anchors)]
             base = torch.tensor([float(bb["knobs"][k]) for k in KNOB_NAMES])
             knobs = (base * (1.0 + 0.08 * torch.randn(N_KNOBS))).clamp(lo, hi)
-            a_t = torch.zeros(N_KNOBS)
+            # Stage 6.1: this heuristic perturbation also chooses knobs
+            # directly, outside the actor -- derive the matching normalized
+            # action rather than storing a zero placeholder (see
+            # encode_action's docstring for why zero is wrong here too).
+            a_t = encode_action(knobs, lo, hi)
+            step_source = "exploitation_tail"
+            n_exploitation_tail_transitions += 1
         elif use_ranker:
             ranked = ranker.rank([b[2] for b in batch])
             pick = ranked[0][0].metadata["i"]
@@ -801,13 +920,19 @@ def sac_size(topology_id: str, graph, spec: dict, exe, out_dir: Path, costs,
                          max(0.0, 1.0 - _d) if _d is not None else 0.0)
         last_mv = mv                      # the action just moved this
         done = 1.0 if step == budget - 1 else 0.0
+        # Stage 6.1 hard invariant (Section 5): every stored transition's
+        # action must decode back to the knobs actually sent to SPICE, for
+        # actor-picked steps as well as the two scripted branches above.
+        roundtrip_err = assert_action_roundtrips_to_knobs(a_t, knobs, lo, hi)
+        max_action_roundtrip_error = max(max_action_roundtrip_error,
+                                         roundtrip_err)
         transitions.append({"action": [float(x) for x in a_t],
                             "reward": float(r),
                             "knobs": [float(x) for x in knobs],
                             "obs": [float(x) for x in obs],
                             "next_obs": [float(x) for x in
                                          _obs(step + 1, best_close, last_mv)],
-                            "done": done})
+                            "done": done, "action_source": step_source})
 
         def _sample_logp(state_vec):
             """Reparameterized action + its tanh-corrected log-probability."""
@@ -883,6 +1008,33 @@ def sac_size(topology_id: str, graph, spec: dict, exe, out_dir: Path, costs,
             pairs = build_pairs(recs)
             if pairs:
                 ranker.train_on_pairs(pairs)
+        # BUDGET REALLOCATION (2026-08-16, opt-in): a real measured full-spec
+        # pass ends the loop -- the remaining calls are banked, not burned on
+        # FoM polish. calls_to_first_pass across campaigns shows easy specs
+        # pass at call ~2 of 16 while hard specs starve; spice_calls =
+        # len(results) stays accurate automatically. Default False = every
+        # existing caller byte-identical (frozen campaign budgets untouched).
+        if early_stop_on_pass and postsizing_outcome(
+                results[-1], spec)["exact_spec_pass"]:
+            break
+        # FOM-PLATEAU STOP (2026-08-19, opt-in): once a measured pass exists,
+        # keep sizing WHILE the best passing FoM is still improving; stop
+        # after `patience` consecutive calls without a new best. Neither
+        # "stop at first pass" (early_stop_on_pass: cheap, poor FoM) nor
+        # "always run the full budget" (A0: good FoM, full cost) -- stop
+        # when the search stops paying. The Supervisor's committed-branch
+        # policy; fixed arms never set it (byte-identical).
+        if fom_plateau_patience is not None:
+            from agentic_raptor.electrical.fom import compute_fom
+            best_f, best_i = None, None
+            for i_, r_ in enumerate(results):
+                if postsizing_outcome(r_, spec)["exact_spec_pass"]:
+                    f_ = compute_fom(r_.get("ugbw_hz"), r_.get("c_load_f") or cl,
+                                     r_.get("idd_a")).get("fom_value")
+                    if f_ is not None and (best_f is None or f_ > best_f):
+                        best_f, best_i = f_, i_
+            if best_i is not None and (len(results) - 1 - best_i) >= fom_plateau_patience:
+                break
     # -------- always expose THIS run's trained surrogate ---------------------
     # It is trained on every measurement taken during sizing and then thrown
     # away whenever persist=False -- which is how the canonical pipeline runs.
@@ -939,11 +1091,28 @@ def sac_size(topology_id: str, graph, spec: dict, exe, out_dir: Path, costs,
                     tr, family=family,
                     electrical_environment_version="POST_CLOAD_FIX_V1")) + "\n")
         memory["persisted"] = True
+    # QUALITY POLISH (2026-08-17, opt-in select_by="fom"): among the steps
+    # that MEASURED a full-spec pass, return the highest sizing-time FoM
+    # (UGBW*CL/IDD from real per-step SPICE) -- monotone: never trades a
+    # pass for FoM; when no step passed, fall back to the reward incumbent
+    # (byte-identical to the default). Default "reward" is unchanged.
     best = max(results, key=lambda r: r["reward"])
+    if select_by == "fom":
+        from agentic_raptor.electrical.fom import compute_fom
+        passing = [r for r in results
+                   if postsizing_outcome(r, spec)["exact_spec_pass"]]
+        scored = [(compute_fom(r.get("ugbw_hz"), r.get("c_load_f") or cl,
+                               r.get("idd_a")).get("fom_value"), r)
+                  for r in passing]
+        scored = [(f, r) for f, r in scored if f is not None]
+        if scored:
+            best = max(scored, key=lambda t: t[0])[1]
     outcome = postsizing_outcome(best, spec)
     first_pass = next((r["step"] + 1 for r in results
                        if postsizing_outcome(r, spec)["exact_spec_pass"]),
                       None)
+    actor_checksum_final = parameter_checksum(actor)
+    critic_checksum_final = parameter_checksum(q1) + parameter_checksum(q2)
     return {"best": best, "outcome": outcome, "results": results,
             "memory": memory,
             "surrogate_checkpoint": str(run_surrogate) if run_surrogate
@@ -958,6 +1127,19 @@ def sac_size(topology_id: str, graph, spec: dict, exe, out_dir: Path, costs,
             "sac_tau": tau if sequential else None,
             "reward_policy": (REWARD_POLICY_VERSION
                               if reward_fn is spec_reward else "legacy"),
+            # Stage 6 audit: proof the actor/critic parameters this call
+            "actor_checksum_initial": actor_checksum_initial,
+            "actor_checksum_final": actor_checksum_final,
+            "actor_params_changed": actor_checksum_initial != actor_checksum_final,
+            "critic_checksum_initial": critic_checksum_initial,
+            "critic_checksum_final": critic_checksum_final,
+            "critic_params_changed": critic_checksum_initial != critic_checksum_final,
+            "final_entropy_alpha": float(log_alpha.exp().detach()),
+            "n_transitions_recorded": len(transitions),
+            # Stage 6.1 repair bookkeeping (Section 9 of the report)
+            "n_nominal_anchor_transitions": n_nominal_anchor_transitions,
+            "n_exploitation_tail_transitions": n_exploitation_tail_transitions,
+            "max_action_roundtrip_error": max_action_roundtrip_error,
             "budget": budget, "seed": seed, "timestamp": time.time(),
             "schema_version": SCHEMA}
 

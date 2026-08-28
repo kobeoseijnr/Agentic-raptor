@@ -55,6 +55,13 @@ TRACKED_ARTIFACTS = {
     "family_spec_gate": ROOT / "artifacts/publication_v2/family_spec_gate/SUMMARY.json",
     "family_spec_gate_bufsfb": ROOT / "artifacts/publication_v2/family_spec_gate/SUMMARY_bufsfb.json",
     "puct_value_calibration_log": ROOT / "artifacts/publication_v3/puct_value_calibration/log.jsonl",
+    # Stage 8 (2026-08-12): the promoted Stage 7.2B DPO V2 ranker, deployed
+    # back into FULL's default. Native to POST_CLOAD_FIX_V1 (trained and
+    # stamped entirely after the C_LOAD repair) -- no PRE_CLOAD_FIX snapshot
+    # of it exists or is meaningful, so TRACKED_ARTIFACTS and
+    # LIVE_ARTIFACT_PATHS point at the identical path.
+    "dpo_ranker_v2": (ROOT / "artifacts/publication_v3/stage7_2b_dpo_repair"
+                     / "post_sac_ranker_v2_combined__C_current/training_manifest.json"),
 }
 
 #: where the LIVE system reads each artifact from AFTER the Stage 1.6

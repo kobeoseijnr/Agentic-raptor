@@ -153,7 +153,18 @@ def evaluation_context_id(spec: dict) -> str:
 def compensation_class(obj: dict) -> str:
     c = ((obj.get("compensation") or [{}])[0].get("type", "none")
          if obj.get("compensation") else "none")
-    return {"miller_cap": "miller", "rc_nulling": "rc"}.get(c, c)
+    base = {"miller_cap": "miller", "rc_nulling": "rc"}.get(c, c)
+    # TIER-2 (2026-08-17): family names carry the new structural markers so
+    # "2s_rc" and "2s_rc_cas" are different families downstream (planner,
+    # critic, bandit features all key on canonical_family). Pre-existing
+    # proposals (no tier-2 blocks) keep their exact historical names.
+    from agentic_raptor.llm_dpo.stage3e4 import tier2_flags
+    cas, ab = tier2_flags(obj)
+    if cas:
+        base += "_cas"
+    if ab:
+        base += "_ab"
+    return base
 
 
 def candidate_identity(obj: dict) -> dict:
