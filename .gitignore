@@ -55,3 +55,4 @@ Agentic_Raptor/repositories/
 # 157 MB file inventory of the original RAPTOR tree. Generated data, and
 # over GitHub's 100 MB per-file limit. Regenerate with _separation_inventory.py.
 ORIGINAL_RAPTOR_FILE_INVENTORY.csv
+trail/
