@@ -1,4 +1,4 @@
-# Repository Audit — existing RAPTOR codebase
+# Repository Audit — existing legacy RAPTOR codebase
 
 Date: 2026-07-25. Based on direct inspection of `c:\Users\kobeo\OneDrive\Desktop\raptor1`.
 
@@ -164,7 +164,7 @@ policy + weighted value loss, with validation-based model selection) — but it 
 dataset pipeline** (checkpoint 5d datasets collected from MCTS trajectories). The value targets
 come from inner-sizing evaluator estimates, **not** from final post-sizing SPICE returns
 propagated by trajectory-level credit assignment, and there is no integrated
-search → train → search self-play loop. This is precisely the gap Agentic RAPTOR's
+search → train → search self-play loop. This is precisely the gap RAPTOR's
 `topology_rl.trainer` + `learning.cross_level_credit` close.
 
 ## 3. Reuse decisions

@@ -15,7 +15,7 @@ from typing import Any
 
 @dataclass
 class EpisodeOutcome:
-    """One completed Agentic RAPTOR episode (fields per spec §3)."""
+    """One completed RAPTOR episode (fields per spec §3)."""
 
     episode_id: str
     specifications: dict[str, Any]

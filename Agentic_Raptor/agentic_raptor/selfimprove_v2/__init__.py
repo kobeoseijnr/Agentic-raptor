@@ -1,4 +1,4 @@
-"""Agentic RAPTOR v2 self-improvement.
+"""RAPTOR v2 self-improvement.
 
 Built entirely around `run_raptor_v2.run_pipeline`. It shares no code, no
 checkpoints and no datasets with the older self-improvement loop, which drove

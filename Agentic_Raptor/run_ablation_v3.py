@@ -86,6 +86,17 @@ def main():
     ap.add_argument("--pvt-temps-c", default="27",
                     help="comma-separated ABSOLUTE temperatures (deg C) "
                          "for --pvt, e.g. -40,27,85")
+    ap.add_argument("--blocks-vocab", default="stock", choices=("stock", "extended"),
+                    help="DATE step 3: 'extended' serves the tier-2 BLOCKS line "
+                         "(cascode/class-AB) at prompt-load time; default unchanged")
+    ap.add_argument("--robust-delivery", action="store_true",
+                    help="ROBUST DELIVERY: worst-margin sizing pick, equal-split supervisor, "
+                         "corner-check both candidates in stage 9 (needs --pvt)")
+    ap.add_argument("--sizing-budget", type=int, default=None,
+                    help="override the per-branch optimization SPICE budget (default: arm config)")
+    ap.add_argument("--pool-floor", type=int, default=None,
+                    help="DATE step 3: keep proposing until the agentic pool holds N "
+                         "distinct candidates (default: historical stop at 2)")
     ap.add_argument("--paper-mode", action="store_true",
                     help="run the full preflight check first and REFUSE to "
                          "execute anything if a blocker is found")
@@ -203,6 +214,12 @@ def main():
                         budget = kwargs.pop("budget")
                         if aid in AGENTIC_ARMS:
                             kwargs["agents"] = AGENTIC_ARMS[aid]
+                            # 2026-08-30 repairs (see AG_WEAKNESS_
+                            # INVESTIGATION.md): post-pass margin-climb
+                            # tail + 6 dB gain-margin-guarded selection.
+                            # Agentic arm only; A0 stays the frozen
+                            # pre-repair reference.
+                            kwargs["margin_tail"] = 12
                             # ADAPTIVE ATTEMPTS (2026-08-17): the agentic
                             # arm stops the LLM hunt after 2 consecutive
                             # attempts add nothing new (the Critic already
@@ -214,6 +231,14 @@ def main():
                             # the SAME full ladder as every other arm; AG's
                             # runtime win comes from SPICE banking, not here.
                             kwargs["proposal_stall_stop"] = None
+                        if args.blocks_vocab != "stock":
+                            kwargs["blocks_vocab"] = args.blocks_vocab
+                        if args.pool_floor is not None:
+                            kwargs["proposal_pool_floor"] = args.pool_floor
+                        if args.robust_delivery:
+                            kwargs["robust_delivery"] = True
+                        if args.sizing_budget is not None:
+                            budget = args.sizing_budget
                         spec_h = (lookup_spec(args.split, idx, registry) or {}).get("spec_hash")
                         t0 = time.time()
                         try:

@@ -1,4 +1,4 @@
-"""FULL-FIDELITY Agentic RAPTOR pipeline — one command, one spec, the REAL
+"""FULL-FIDELITY RAPTOR pipeline — one command, one spec, the REAL
 components at every layer:
 
 spec -> RAG -> SFT topology LLM -> parser/validators/allow-list -> realisation

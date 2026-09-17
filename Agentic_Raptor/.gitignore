@@ -7,4 +7,7 @@ outputs/*
 !outputs/.gitkeep
 *.jsonl
 .env
-external_baselines/
+/external_baselines/
+
+# planning doc, not project source
+Agentic_RAPTOR_Baseline_Comparison_Plan.docx

@@ -1,4 +1,4 @@
-"""Shared enums and type aliases for Agentic RAPTOR core models."""
+"""Shared enums and type aliases for RAPTOR core models."""
 
 from __future__ import annotations
 

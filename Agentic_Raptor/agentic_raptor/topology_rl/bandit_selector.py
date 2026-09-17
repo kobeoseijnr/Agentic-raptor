@@ -162,12 +162,37 @@ def bandit_select_two(candidates: list[dict], spec: dict, ctx_id: str, *,
         raise BanditSelectorError(
             f"bandit pool collapsed to {len(ranked)} distinct canonical "
             "topology(ies) -- cannot select two DISTINCT outputs")
-    selected = ranked[:2]
+    # DIVERSE TOP-2 (2026-08-30, HELDOUT29 failure analysis): 16/18 AG_FULL
+    # 3-target failures picked 2s_none into BOTH slots' capability class
+    # while the excluded 3-stage candidate passed the same spec under A0.
+    # The learned weights systematically score 3-stage families lowest, so
+    # a pure score top-2 can fill both slots with structurally incapable
+    # families on high-gain specs. Slot 1 stays the score winner; slot 2
+    # becomes the best-scoring candidate with a DIFFERENT stage count
+    # (else different compensation, else the plain runner-up). Selection
+    # between them remains the Supervisor's measured decision.
+    def _sig(c):
+        fam = c.get("canonical_family") or ""
+        parts = fam.split("_", 1)
+        return (parts[0], parts[1] if len(parts) > 1 else "")
+    first = ranked[0]
+    alt = next((c for c in ranked[1:] if _sig(c)[0] != _sig(first)[0]), None)
+    if alt is None:
+        alt = next((c for c in ranked[1:] if _sig(c)[1] != _sig(first)[1]),
+                   None)
+    diversity_promoted = alt is not None and alt is not ranked[1]
+    if alt is None:
+        alt = ranked[1]
+    selected = [first, alt]
+    for c in ranked:
+        c["selected_top2"] = c is first or c is alt
+        c["diversity_promoted"] = diversity_promoted and c is alt
     assert selected[0]["canonical_graph_hash"] != selected[1]["canonical_graph_hash"]
     return {"selected": selected, "ranked": ranked,
            "search": ("bandit_top2_az_hybrid" if az_selected
                       else "bandit_top2"),
            "weights_sha256": PROMOTED_BANDIT_SHA256,
            "pool_size": len(ranked),
+           "diversity_promoted": diversity_promoted,
            "az_contributed": sum(1 for c in ranked
                                  if c.get("source") == "alphazero_candidate")}

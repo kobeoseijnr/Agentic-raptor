@@ -1,4 +1,4 @@
-# AG-FULL — the Agentic RAPTOR full pipeline (verified 2026-08-27)
+# AG-FULL — the RAPTOR full pipeline (verified 2026-08-27)
 
 The single authoritative description of what executes on an AG_FULL run.
 Source-verified against run_raptor_v2.py, agentic_raptor/agents/*, 

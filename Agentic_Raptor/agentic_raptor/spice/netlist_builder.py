@@ -77,7 +77,7 @@ def build_circuit(
         raise SimulationError("no connected OUTPUT_PORT; nothing to measure")
 
     header = [
-        f"* Agentic RAPTOR netlist  candidate={candidate_id}",
+        f"* RAPTOR netlist  candidate={candidate_id}",
         f"* topology_id={graph.graph_id}  topology_hash={graph.structural_hash()}",
         f"* model_library={model_library.label}",
     ]

@@ -1,10 +1,10 @@
-"""Exception hierarchy for Agentic RAPTOR."""
+"""Exception hierarchy for RAPTOR."""
 
 from __future__ import annotations
 
 
 class AgenticRaptorError(Exception):
-    """Base class for all Agentic RAPTOR errors."""
+    """Base class for all RAPTOR errors."""
 
 
 class ConfigurationError(AgenticRaptorError):

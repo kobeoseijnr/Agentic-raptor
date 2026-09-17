@@ -36,7 +36,7 @@ def build() -> str:
 
     L = []
     A = L.append
-    A("# Agentic RAPTOR -- Publication Experiment Report")
+    A("# RAPTOR -- Publication Experiment Report")
     A(f"\nGenerated {time.strftime('%Y-%m-%d %H:%M')} from saved artifacts "
       "only. PENDING sections list the exact command that produces them.\n")
 

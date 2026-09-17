@@ -1,71 +1,54 @@
-# Novelty and Claims
+# RAPTOR — Novelty and Claims
 
-## Central hypothesis (defensible)
+Updated: 2026-09-16
 
-> A topology should be judged by its final performance after continuous sizing and
-> SPICE verification, not only by its unsized graph structure.
+This document defines the novelty and claims for the architecture evaluated in the current RAPTOR paper:
 
-Operationally: the topology-level value function is trained against returns computed
-from **post-sizing SPICE outcomes** (`z_t = γ^(T−1−t) · R_final`), never against
-purely structural heuristics. Structural validity contributes only a small shaping
-term whose weight is configuration, not code.
+> **RAPTOR: Retrieval-Augmented Preference-Guided Multi-Agent Topology and Sizing Optimization via Reinforcement Learning for Analog Circuits**
 
-## Candidate contribution
+This document intentionally covers only the system evaluated in the paper. Experimental extensions such as AlphaZero topology RL, MCTS topology editing, multimodal/VLM generation, token-level LLM DPO, and cross-level topology-policy training are outside the scope of the current paper.
 
-An agentic analog-design framework coupling:
+---
+
+## Central Hypothesis
+
+> A topology should not be selected only because its unsized structure appears promising. Its usefulness depends on whether it can be efficiently sized to satisfy the target specifications under SPICE verification.
+
+Topology generation and circuit sizing are therefore treated as coupled decisions.
+
+A generated topology may be structurally valid but difficult or impossible to size to the requested specifications. Likewise, an effective sizing algorithm cannot overcome fundamental limitations of an unsuitable topology.
+
+RAPTOR addresses this coupling by generating multiple candidate topologies, refining them, selecting promising and structurally diverse candidates, probing their measured performance, and allocating the available SPICE budget according to downstream sizing potential.
+
+---
+
+## Core Contribution
+
+RAPTOR integrates:
 
 ```text
-Multimodal specification parsing
-+
-RAG-conditioned multimodal topology generation
-+
-AlphaZero-inspired topology reinforcement learning
-+
-Graph-conditioned model-based Soft Actor-Critic sizing
-+
-Post-sizing SPICE-based cross-level credit assignment
-+
-Adaptive regenerate/edit/resize/stop coordination
-```
-
-The claimed novelty candidate is the **integration**: a single closed loop in which
-(a) the discrete topology policy learns from the continuous sizing level's final
-simulator-verified outcome via trajectory-level credit, and (b) an agentic
-coordinator allocates edit/sizing/SPICE budgets across both levels with logged,
-auditable decisions.
-
-## Claims explicitly NOT made
-
-We do **not** claim any of the following:
-
-- first multimodal circuit generator;
-- first LLM circuit generator;
-- first RL topology generator;
-- first use of MCTS in circuit generation;
-- first joint topology-and-sizing method;
-- first agentic circuit-design framework.
-
-Prior work inside this very repository already contains an LLM netlist generator,
-graph-edit MCTS, learned topology policy/value training (offline, checkpoint 5d),
-MB-SAC sizing, RAG memory, and a rule-based controller — the audit
-(`REPOSITORY_AUDIT.md`) documents exactly what existed before this extension.
-
-## Status of performance claims
-
-**All performance claims are hypotheses until experiments are complete.** The
-current implementation runs end-to-end with a deterministic mock simulator; no
-comparative results exist yet. Planned evidence: improvement curves of final
-post-sizing reward across episodes vs. (i) unsized-heuristic topology scoring and
-(ii) the legacy offline policy/value pipeline, under matched SPICE budgets.
-
-## Differences from the existing RAPTOR pipeline (factual, audit-based)
-
-| Aspect | Legacy RAPTOR | Agentic RAPTOR |
-|---|---|---|
-| Specification input | Netlist/text-centric scripts | Multimodal parse + fusion + provenance + conflict detection |
-| Topology value targets | Inner-sizing evaluator estimates (offline datasets) | Final post-sizing SPICE return via credit assignment |
-| Policy/value training | Offline dataset pipeline (checkpoint 5d) | In-loop updates after every episode |
-| MCTS | PUCT, top-k priors | PUCT + progressive widening + visit-count policy targets |
-| Sizing | Genuine SAC, surrogate horizon-1 synthetic data | Genuine SAC + jointly trained dynamics model (reward + termination heads), actor-driven imagined rollouts |
-| Orchestration | Rule-based controller script | State-machine coordinator with budget manager, logged decisions, learnable-policy interface |
-| Memory | Simulator-grounded JSONL items | Typed entries with embeddings, PVT, edit trajectories, outcome write-back |
+Design Specifications
+        +
+Retrieval-Augmented Topology Generation
+        +
+SFT-Adapted LLM
+        +
+Topology Critic Agent
+        +
+Contextual-Bandit Topology Selection
+        +
+Two-Candidate SPICE Probing
+        +
+Shared SPICE-Budget Allocation
+        +
+MB-SAC Continuous Circuit Sizing
+        +
+Online Surrogate Guidance
+        +
+Preference Ranking
+        +
+PVT Analysis
+        +
+Final SPICE Verification
+        +
+Bounded Recovery

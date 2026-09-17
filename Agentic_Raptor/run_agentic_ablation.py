@@ -1,4 +1,4 @@
-"""AGENTIC RAPTOR ABLATION: 4 agents vs the agent-free FULL baseline.
+"""RAPTOR ABLATION: 4 agents vs the agent-free FULL baseline.
 
     AG_FULL       planner + critic + supervisor + recovery
     AG_NO_PLAN    all minus Design Planner
@@ -54,6 +54,11 @@ def main():
                                          calibrate=False, seed=0,
                                          learning_mode="frozen",
                                          pvt_config=pvt, agents=ag,
+                                         # 2026-08-30 repairs: post-pass
+                                         # margin climb + mguard selection
+                                         # (active only on agentic arms via
+                                         # the supervisor path)
+                                         margin_tail=(12 if ag else 0),
                                          out_prefix=f"AGB_{arm}")
                     s9 = tr.get("stage9_verification") or {}
                     n = tr.get("nominal") or {}

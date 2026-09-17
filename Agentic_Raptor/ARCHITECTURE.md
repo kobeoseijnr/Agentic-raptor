@@ -1,130 +1,133 @@
-# Agentic RAPTOR — System Architecture
+# RAPTOR — System Architecture
 
-Updated: 2026-07-26 (through Stage 3E.4A). Status labels: **[V]** verified on real
-hardware, **[P]** pilot-scale mechanics proven, **[D]** deferred (blocker recorded).
+Updated: 2026-09-16
 
-## End-to-end pipeline
+This document describes the **RAPTOR architecture evaluated in the paper**:
 
-```
-                         ┌────────────────────────────────────┐
-                         │       Design Specifications        │
-                         │  gain / UGBW / PM / power / load   │
-                         │  datasets/target_sets_v1  [V]      │
-                         └──────────────────┬─────────────────┘
-                                            │
-                         ┌──────────────────▼─────────────────┐
-                         │        Hierarchical RAG  [V]       │
-                         │  L1 corpus → L2 family → L3 block  │
-                         │  → L4 simulation memory            │
-                         │  agentic_raptor/corpus             │
-                         └──────┬───────────────────┬─────────┘
-                                │                   │
-              ┌─────────────────▼──────────────┐   ┌────────▼────────────────────┐
-              │  MULTIMODAL Topology LLM       │   │  Verified Registry Roots    │
-              │  MultimodalTopologyContext:    │   │  174 families, role-aware   │
-              │   spec text + RAG evidence     │   │  hashes, tiers A1/A2/…  [V] │
-              │   + FunctionalStageGraph       │   │  operational_v3             │
-              │   + DeviceCircuitGraph         │   └────────┬────────────────────┘
-              │   + schematic image PIXELS ────┼─┐          │
-              │  image → native processor →    │ │ datasets/schematic_images_v2 │
-              │  vision encoder → projector →  │ │ (image↔graph↔proposal        │
-              │  language backbone  [P]        │ │  alignment, SHA-256)  [P]    │
-              │  frozen base + frozen vision   │ └─                             │
-              │  encoder; language-side LoRA;  │            │
-              │  SFT + true token-level DPO    │            │
-              │  (frozen multimodal reference) │            │
-              │  pilot: SmolVLM-256M [P];      │            │
-              │  primary: Qwen2.5-VL-3B [D:GPU]│            │
-              │  llm_dpo/multimodal.py         │            │
-              └──────┬─────────────────────────┘            │
-                     │  structured TopologyProposal │
-                     │  (JSON; rationale ≠ graph;   │
-                     │   netlist text NEVER runs)   │
-              ┌──────▼───────────────────────────────▼──────┐
-              │   Parser → Canonicaliser → Topology         │
-              │   Validator → Mapping Validator  [V]        │
-              │   stage3e2_edits.validate_proposal          │
-              │   topology_rl/stage3e1.validate_candidate   │
-              └──────────────────┬──────────────────────────┘
-                                 │ TopologySearchState (lineage, budgets)
-              ┌──────────────────▼──────────────────────────┐
-              │   AlphaZero Topology RL  [V]                │
-              │   policy+value heads on shared MP encoder;  │
-              │   PUCT MCTS over mixed actions:             │
-              │   SELECT / KEEP / TERMINATE +               │
-              │   7 executable structural edits             │
-              │   (add/replace stage, load, compensation,   │
-              │    output buffer, local feedback)  [V]      │
-              │   topology_rl/{stage3e1,stage3e2,_edits}    │
-              └──────────────────┬──────────────────────────┘
-                                 │ candidate DeviceCircuitGraph
-              ┌──────────────────▼──────────────────────────┐
-              │   Transistor Realisation  [V]               │
-              │   template mapper + edit library →          │
-              │   Sky130 netlist + sizing manifest          │
-              │   mapping/ + stage3e2_edits                 │
-              └──────────────────┬──────────────────────────┘
-                                 │
-              ┌──────────────────▼──────────────────────────┐
-              │   Graph-conditioned MB-SAC Sizing  [V]      │
-              │   squashed-Gaussian actor, twin critics,    │
-              │   dynamics ensemble w/ calibration gates,   │
-              │   MP-encoder gradients from actor+critic    │
-              │   mb_sac/ + sizing/                         │
-              └──────────────────┬──────────────────────────┘
-                                 │ sizing candidates
-              ┌──────────────────▼──────────────────────────┐
-              │   Surrogate screen [P] +                    │
-              │   Feasibility-Gated Bradley–Terry           │
-              │   Sizing Ranker  [V]  (NOT LLM DPO)         │
-              │   valid > stable > feasible > margins >     │
-              │   FoM > cost; exploration preserved         │
-              │   dpo/ (DPORanker)                          │
-              └──────────────────┬──────────────────────────┘
-                                 │ selected candidates
-              ┌──────────────────▼──────────────────────────┐
-              │   Real ngspice-45.2 + sky130  [V]           │
-              │   open-loop ADM testbench; verified-only    │
-              │   measurements; PVT matrix separate  [V]    │
-              │   electrical/                               │
-              └──────────────────┬──────────────────────────┘
-                                 │ PostSizingTopologyScore
-              ┌──────────────────▼──────────────────────────┐
-              │   Cross-Level Feedback  [V/P]               │
-              │   → AlphaZero value/policy targets          │
-              │   → MB-SAC replay, dynamics, surrogate      │
-              │   → BT ranker pairs (real evidence only)    │
-              │   → L4 simulation memory / RAG              │
-              │   → LLM preference queue (offline dpo_v2)   │
-              └─────────────────────────────────────────────┘
-```
+> **RAPTOR: Retrieval-Augmented Preference-Guided Multi-Agent Topology and Sizing Optimization via Reinforcement Learning for Analog Circuits**
 
-## Two preference systems (strictly separated)
+RAPTOR jointly coordinates analog circuit **topology generation** and **circuit sizing** under a shared SPICE budget. The system contains four main agents:
 
-| | True LLM DPO (`llm_dpo/`) | BT Sizing Ranker (`dpo/`) |
-|---|---|---|
-| Operates on | token log-probs, policy vs frozen reference | circuit-candidate features |
-| Improves | topology proposals | sizing-candidate selection |
-| Objective | −w·logsigmoid(β·Δ(policy−ref) margins) | BT logistic over feature scores |
-| Records | same-context response pairs | real-SPICE outcome pairs |
-| Shared data | **none** (tested) | **none** (tested) |
+1. **Topology Generation Agent**
+2. **Topology Critic Agent**
+3. **Topology Selection Agent**
+4. **Circuit Sizing Agent**
 
-## Safety and honesty boundaries
-- No LLM output bypasses parser → validator → mapping validation; generated
-  netlist text is never executed (tested).
-- SPICE is the final authority; surrogate/dynamics predictions are never stored
-  as measurements; withheld ≠ failed; validator rejections ≠ simulator failures.
-- Cache hits and model rollouts are never counted as SPICE calls.
-- Polarity/stability adjudication is structural, never outcome-based.
-- Every stage freezes a SHA-256-verified code snapshot before changes.
+These agents are followed by preference ranking, PVT analysis, final SPICE verification, and a bounded recovery mechanism.
 
-## Key artifacts
-`artifacts/topology_registry_operational_v3` (corpus) · `datasets/target_sets_v1`
-· `datasets/simulation_memory/*.jsonl` · `datasets/schematic_images_v1` ·
-`artifacts/stage3d*|3e*` (campaign evidence) · `reports/` (80+ stage reports) ·
-`tests/` (369+ passing).
+> **Scope note:** This document describes the architecture used in the current RAPTOR paper and evaluation. Experimental extensions such as AlphaZero-style topology RL, MCTS topology editing, multimodal/VLM generation, and cross-level RL training are not part of the evaluated paper architecture and should be documented separately.
 
-## Open deferrals
-GPU campaign for 1–7B (text) and Qwen2.5-VL-3B (multimodal) topology LLMs;
-publication-scale AZ self-play and MB-SAC ablations; full 91-family repair
-curriculum; success-probability calibration head.
+---
+
+## End-to-End Pipeline
+
+```text
+┌──────────────────────────────────────────────┐
+│              Design Specifications           │
+│                                              │
+│  gain / UGBW / phase margin / load           │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────┐
+│          Topology Generation Agent           │
+│                                              │
+│  • Analyze target specifications             │
+│  • Retrieve similar measured designs         │
+│  • Up to 6 RAG examples                      │
+│  • Maximum 2 examples per topology family    │
+│  • SFT-adapted Qwen3-4B-Instruct-2507        │
+│  • Generate 4–6 candidate topologies         │
+│  • Structured topology representation        │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────┐
+│            Topology Critic Agent             │
+│                                              │
+│  • Structural validity checks                │
+│  • Stage-count diversity                     │
+│  • Compensation diversity                    │
+│  • Specification-aware refinement            │
+│  • Limited regeneration rounds               │
+│  • Validation and deduplication              │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────┐
+│          Topology Selection Agent            │
+│                                              │
+│  • 24-D topology/specification context       │
+│  • Contextual-bandit ranking                 │
+│  • Offline ridge-regression reward model     │
+│  • Select highest-ranked topology            │
+│  • Select structurally diverse alternative   │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+             ┌───────────────────┐
+             │ Primary Topology  │
+             └─────────┬─────────┘
+                       │
+             ┌─────────┴─────────┐
+             │                   │
+             ▼                   ▼
+      Primary Candidate   Alternative Candidate
+             │                   │
+             └─────────┬─────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────┐
+│             Circuit Sizing Agent             │
+│                                              │
+│  • Probe both selected topologies            │
+│  • Compare SPICE-measured performance        │
+│  • Allocate remaining simulation budget      │
+│  • MB-SAC continuous sizing                  │
+│  • Online surrogate guidance                 │
+│  • Reserve budget for refinement/recovery    │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────┐
+│              Preference Ranking              │
+│                                              │
+│  • Remove invalid/unstable designs           │
+│  • Compare feasible candidates using:        │
+│      - specification margins                 │
+│      - FoM                                   │
+│      - efficiency                            │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────┐
+│             Final Refinement                 │
+│                                              │
+│  Remaining SPICE budget may be used to       │
+│  further improve the selected design.        │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────┐
+│                PVT Analysis                  │
+│                                              │
+│  Process / voltage / temperature evaluation  │
+│  More robust feasible design is preferred    │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────┐
+│          Final SPICE Verification            │
+└──────────────────────┬───────────────────────┘
+                       │
+                 verification fails
+                       │
+                       ▼
+┌──────────────────────────────────────────────┐
+│              Recovery Attempt                │
+│                                              │
+│  • Revisit alternative topology              │
+│  • Re-optimize with remaining budget         │
+│  • Reserve one SPICE call for final check    │
+│  • At most one recovery attempt              │
+└──────────────────────────────────────────────┘

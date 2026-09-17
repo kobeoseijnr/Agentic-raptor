@@ -1,4 +1,4 @@
-"""Canonical Agentic RAPTOR inference pipeline (publication v2).
+"""Canonical RAPTOR inference pipeline (publication v2).
 
     Specification
     -> RAG retrieves structured verified evidence
@@ -41,6 +41,11 @@ OUT = ROOT / "artifacts/publication_v2/raptor_v2_runs"
 MEM = ROOT / "datasets/simulation_memory"
 TARGET_K = 5
 SELECT_K = 2
+#: DATE step 3 (2026-09-07): served in place of the corpus BLOCKS line when
+#: run_pipeline(blocks_vocab="extended"). Byte-identical to the line in
+#: agentic_raptor/publication/tier2.py and tools/deconfound_corpus.py.
+EXTENDED_BLOCKS_LINE = ("### BLOCKS five_transistor_first_stage,cascode_input_stage,"
+                        "cs_gain_stage,class_ab_output_stage,miller_cap,bias_mirror\n")
 #: the only honest candidate provenances. "llm" (generated) and "retrieval"
 #: (A1: K unique EXISTING topologies, no generative model -- see
 #: retrieve_topology_candidates) are both real, non-fabricated pools.
@@ -423,6 +428,7 @@ def _size_one_branch(label: str, c: dict, spec: dict, exe, budget: int, *,
                      use_surrogate: bool = True, use_sizing_ranker: bool = True,
                      sizing_method: str = "sac", c_load_f: float | None = None,
                      seed_base: int = 17, select_by: str = "reward",
+                     sizing_margin_tail: int = 0,
                      fom_plateau_patience: int | None = None,
                      tail_anchor_budget: int | None = None) -> tuple:
     """Size ONE branch -- extracted verbatim from size_and_predict's loop
@@ -459,6 +465,7 @@ def _size_one_branch(label: str, c: dict, spec: dict, exe, budget: int, *,
                     budget=budget, seed=seed_base + i, persist=False,
                     early_stop_on_pass=sizing_early_stop,
                     select_by=select_by,
+                    margin_tail_calls=sizing_margin_tail,
                     fom_plateau_patience=fom_plateau_patience,
                     tail_anchor_budget=tail_anchor_budget,
                     use_surrogate=use_surrogate,
@@ -554,6 +561,12 @@ def main():
                          "keeps existing behaviour; >1 trades N x sizing "
                          "cost for recovering designs lost to sizer luck "
                          "rather than a genuine capability gap")
+    ap.add_argument("--margin-tail", type=int, default=0,
+                    help="reserve the last N sizing calls for a post-pass "
+                         "margin climb and select the final design with a "
+                         "6 dB gain-margin guard (fom_mguard). PVT repair "
+                         "(2026-08-30): thin-margin winners die at the 70C "
+                         "corners. 0 = frozen pre-repair behaviour.")
     ap.add_argument("--calibrate", action="store_true",
                     help="verify BOTH designs to build a trusted ranker pair")
     ap.add_argument("--arm", default="L8")
@@ -615,6 +628,7 @@ def main():
                          spec_index=args.spec_index, budget=args.budget,
                          calibrate=args.calibrate,
                          sizing_repeats=args.sizing_repeats,
+                         margin_tail=args.margin_tail,
                          pvt_config=pvt_config)
     print(json.dumps({k: trace[k] for k in
                       ("stage3_propose", "stage5_alphazero", "stage8_ranker",
@@ -635,8 +649,32 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
                  c_load_override_f=None, c_load_override_reason=None,
                  total_mcts_simulations: int | None = None,
                  gate_mode="measured_first", sizing_early_stop=False,
-                 agents: tuple = (), proposal_stall_stop: int | None = None):
+                 agents: tuple = (), proposal_stall_stop: int | None = None,
+                 margin_tail: int = 0,
+                 blocks_vocab: str = "stock",
+                 proposal_pool_floor: int | None = None,
+                 robust_delivery: bool = False):
     """One full pipeline execution. Returns the trace.
+
+    robust_delivery (2026-09-07, opt-in; agentic arms with pvt_config): three
+    changes measured post hoc on the 74 HELDOUT29 winners to lift 4-corner
+    robustness from 36/74 to 69/74 -- (i) sizing delivers the passing point
+    with the largest worst-case margin (select_by="worst_margin") instead of
+    the FoM argmax; (ii) the Supervisor sizes BOTH branches at the full
+    per-branch budget (no banking); (iii) stage 9 corner-checks both sized
+    candidates and delivers the robust one. All corner calls are counted in
+    spice_usage.pvt_spice_calls. Recorded in stage9_verification.
+    robust_delivery. False = byte-identical historical behaviour.
+
+    blocks_vocab (DATE step 3, 2026-09-07): "stock" (default) serves the
+    prompt exactly as stored in the corpus. "extended" rewrites its
+    ### BLOCKS line at load time to the tier-2 vocabulary
+    (cascode_input_stage, class_ab_output_stage added) -- the same line the
+    tier-2 specs and the de-confounded corpus carry -- so a proposer trained
+    on that corpus is served the prompt format it was trained on. Recorded
+    in stage1_spec.blocks_vocab. Corpus files are never modified.
+    proposal_pool_floor: see agents.critic.run_critic_loop(pool_floor);
+    None = historical stop-at-2 behaviour.
 
     Separated from main() so an ablation can hold ONE loaded model across many
     runs -- reloading a 4B model per run costs more than the pipeline itself.
@@ -743,6 +781,13 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
     if not pool:
         raise SystemExit(f"no records in split {split!r}")
     rec = pool[spec_index % len(pool)]
+    if blocks_vocab == "extended":
+        import re as _re
+        rec = dict(rec, prompt=_re.sub(
+            r"### BLOCKS [^\n]*\n", EXTENDED_BLOCKS_LINE, rec["prompt"], count=1))
+        assert EXTENDED_BLOCKS_LINE in rec["prompt"], "BLOCKS line not found"
+    elif blocks_vocab != "stock":
+        raise ValueError(f"blocks_vocab must be 'stock' or 'extended', got {blocks_vocab!r}")
     spec = ig.parse_spec(rec["prompt"])
     spec["spec_id"] = rec["context_id"]
     spec_hash = ig.sha_json(spec)
@@ -769,9 +814,10 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
                              "effective_c_load_f": run_cl,
                              "c_load_override": c_load_override_f is not None,
                              "c_load_override_value": c_load_override_f,
-                             "c_load_override_reason": c_load_override_reason}}
+                             "c_load_override_reason": c_load_override_reason,
+                             "blocks_vocab": blocks_vocab}}
 
-    # ---- AGENTIC RAPTOR (2026-08-16): DesignState + Design Planner --------
+    # ---- RAPTOR (2026-08-16): DesignState + Design Planner --------
     # agents=() (default) is byte-identical baseline. The DesignState is the
     # blackboard the enabled agents share; the BudgetLedger caps agentic
     # spend at the BASELINE's own envelope (fairness invariant: an agentic
@@ -813,7 +859,9 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
                 # map to the critic's candidate shape and ask the plan
                 pool = [{"canonical_family": c.get("family")} for c in raw_cands]
                 return (_critique(pool, ag_state.plan)["satisfied"]
-                        and len(pool) >= SELECT_K)
+                        and len(pool) >= (proposal_pool_floor
+                                          if proposal_pool_floor is not None
+                                          else SELECT_K))
             return propose_and_validate(model, tok, prompt_text,
                                         target_k=target_k,
                                         max_attempts=max_attempts,
@@ -822,7 +870,8 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
                                         stall_stop=proposal_stall_stop,
                                         satisfied_fn=_satisfied)
         loop = run_critic_loop(_propose_fn, rag["prompt"], ag_state.plan,
-                               ag_state.ledger, ag_state)
+                               ag_state.ledger, ag_state,
+                               pool_floor=proposal_pool_floor)
         prop = dict(loop["last_raw"] or {})
         prop["candidates"] = loop["candidates"]
         prop["distinct"] = len(loop["candidates"])
@@ -1138,7 +1187,19 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
             return _size_one_branch(
                 label, cand, spec, exe, b,
                 sizing_early_stop=early_stop,   # banking is the Supervisor's job
-                select_by="fom",             # QUALITY POLISH: best-FoM pass
+                # 2026-08-30 PVT repair: margin-guarded best-FoM pass +
+                # post-pass margin-climb tail (both no-ops at margin_tail=0)
+                # 2026-08-31: margin_mguard delivers the guarded design
+                # with the largest benchmark relative-margin score (the
+                # reported FoM column); power FoM stays measured alongside
+                # 2026-08-31 final: fom_mguard (best power-FoM among
+                # >=6 dB-margin passers). margin_mguard was measured in
+                # HELDOUT29R3: margin-FoM 35->45 but power-FoM -21% --
+                # a bad trade; the margin-FoM gap is template-overshoot
+                # driven and not recoverable by selection.
+                select_by=("worst_margin" if robust_delivery
+                           else ("fom_mguard" if margin_tail > 0 else "fom")),
+                sizing_margin_tail=margin_tail,
                 fom_plateau_patience=plateau,
                 tail_anchor_budget=tail_anchor,
                 sizing_repeats=sizing_repeats, use_surrogate=use_surrogate,
@@ -1146,7 +1207,8 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
                 sizing_method=sizing_method, c_load_f=run_cl,
                 seed_base=seed_b)
         branches = supervise(_size_one, sel["selected"], spec, budget,
-                             ag_state.ledger, ag_state)
+                             ag_state.ledger, ag_state,
+                             equal_split=robust_delivery)
         if branches[0][0].topology_hash == branches[1][0].topology_hash:
             raise ArchitectureViolation("both branches sized the same topology")
         trace["agent_supervisor"] = {"probe": ag_state.branch_probe,
@@ -1437,7 +1499,44 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
                     "distance": new_d}
                 sel_lbl, oc_sel, auth_sel = "R", _recovered["oc"], _recovered["auth"]
         trace["agent_recovery"] = ag_state.recovery_log
+
+    # ---- ROBUST DELIVERY (2026-09-07, opt-in): corner-check both --------
+    _pre_pvt: dict = {}
+    _robust_block: dict | None = None
+    if robust_delivery and pvt_config and pvt_config.enabled:
+        def _corners(label):
+            d_, g_ = designs[label]
+            recs = run_pvt_sweep(d_.sac_trajectory_id, g_, spec, exe, OUT / "pvt",
+                                 pvt_config, label=label,
+                                 c_load_f=verified[label].c_load_f)
+            return recs, aggregate_pvt(recs, pvt_config.required_corner_ids)
+        _robust_block = {"checked": {}, "switched": False, "delivered": sel_lbl}
+        if oc_sel.get("exact_spec_pass"):
+            recs, agg = _corners(sel_lbl)
+            _pre_pvt[sel_lbl] = recs
+            _robust_block["checked"][sel_lbl] = bool(agg.get("robust_complete_pass"))
+        if not _robust_block["checked"].get(sel_lbl) and bak_lbl in designs:
+            if bak_lbl not in verified:
+                _oc_b, _auth_b = verify(bak_lbl, "backup")
+                verified[bak_lbl] = _auth_b
+                measured[bak_lbl] = {"gain_db": _auth_b.gain_db, "pm_deg": _auth_b.pm_deg,
+                                     "ugbw_hz": _auth_b.ugbw_hz,
+                                     "distance": _auth_b.normalized_distance_to_feasibility}
+                reason = reason or "robust_delivery_check"
+            else:
+                _oc_b = _oc_bak          # verified earlier in this stage (dual path)
+            if _oc_b.get("exact_spec_pass"):
+                recs, agg = _corners(bak_lbl)
+                _pre_pvt[bak_lbl] = recs
+                _robust_block["checked"][bak_lbl] = bool(agg.get("robust_complete_pass"))
+                if agg.get("robust_complete_pass"):
+                    _robust_block.update(switched=True, delivered=bak_lbl,
+                                         reason=("selected design not robust at corners; "
+                                                 "runner-up passes nominal and all corners"))
+                    sel_lbl, oc_sel, auth_sel = bak_lbl, _oc_b, verified[bak_lbl]
+                    bak_lbl = "B" if sel_lbl == "A" else "A"
     trace["stage9_verification"] = {
+        "robust_delivery": _robust_block,
         "authoritative_engine": "ngspice",
         "verified_designs": sorted(verified),
         "second_design_reason": reason,
@@ -1523,11 +1622,14 @@ def run_pipeline(model, tok, adapter, *, split="heldout", spec_index=0,
         pvt_eligible = bool(oc_sel.get("exact_spec_pass"))
         pvt_result["eligible"] = pvt_eligible
         if pvt_eligible:
-            corner_records = run_pvt_sweep(
+            corner_records = _pre_pvt.get(sel_lbl) or run_pvt_sweep(
                 sel_d.sac_trajectory_id, sel_graph, spec, exe, OUT / "pvt",
                 pvt_config, label=sel_lbl, c_load_f=auth_sel.c_load_f)
+            # every corner call made under robust delivery is counted, on
+            # BOTH candidates, whether or not that candidate was delivered
+            _all_recs = list(_pre_pvt.values()) if _pre_pvt else [corner_records]
             pvt_spice_calls = sum(r.get("real_spice_calls", 1)
-                                  for r in corner_records)
+                                  for recs in _all_recs for r in recs)
             pvt_result.update(aggregate_pvt(corner_records,
                                             pvt_config.required_corner_ids))
             pvt_result["corners"] = corner_records

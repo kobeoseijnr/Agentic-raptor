@@ -1,0 +1,183 @@
+{
+ "created": "2026-08-28",
+ "source_corpus_hash": "98c7949294b1aa19",
+ "n_topologies": 16,
+ "topologies": [
+  {
+   "topology_id": "topology_0002",
+   "stages": 2,
+   "comp": "none",
+   "buffer": false,
+   "fb": false,
+   "n_specs": 10,
+   "splits": {
+    "train": 10
+   }
+  },
+  {
+   "topology_id": "topology_0003",
+   "stages": 2,
+   "comp": "none",
+   "buffer": false,
+   "fb": false,
+   "n_specs": 10,
+   "splits": {
+    "train": 10
+   }
+  },
+  {
+   "topology_id": "topology_0005",
+   "stages": 2,
+   "comp": "miller",
+   "buffer": false,
+   "fb": false,
+   "n_specs": 10,
+   "splits": {
+    "blindtest": 10
+   }
+  },
+  {
+   "topology_id": "topology_0008",
+   "stages": 2,
+   "comp": "none",
+   "buffer": false,
+   "fb": false,
+   "n_specs": 10,
+   "splits": {
+    "heldout": 10
+   }
+  },
+  {
+   "topology_id": "topology_0009",
+   "stages": 2,
+   "comp": "none",
+   "buffer": false,
+   "fb": false,
+   "n_specs": 10,
+   "splits": {
+    "blindtest": 10
+   }
+  },
+  {
+   "topology_id": "topology_0011",
+   "stages": 2,
+   "comp": "miller",
+   "buffer": false,
+   "fb": false,
+   "n_specs": 10,
+   "splits": {
+    "train": 10
+   }
+  },
+  {
+   "topology_id": "topology_0013",
+   "stages": 3,
+   "comp": "miller",
+   "buffer": false,
+   "fb": false,
+   "n_specs": 10,
+   "splits": {
+    "train": 10
+   }
+  },
+  {
+   "topology_id": "topology_0014",
+   "stages": 2,
+   "comp": "miller",
+   "buffer": false,
+   "fb": false,
+   "n_specs": 10,
+   "splits": {
+    "train": 10
+   }
+  },
+  {
+   "topology_id": "topology_0015",
+   "stages": 2,
+   "comp": "miller",
+   "buffer": false,
+   "fb": false,
+   "n_specs": 10,
+   "splits": {
+    "train": 10
+   }
+  },
+  {
+   "topology_id": "topology_v2_0001",
+   "stages": 2,
+   "comp": "miller",
+   "buffer": false,
+   "fb": false,
+   "n_specs": 5,
+   "splits": {
+    "train": 5
+   }
+  },
+  {
+   "topology_id": "topology_v2_0002",
+   "stages": 2,
+   "comp": "none",
+   "buffer": false,
+   "fb": false,
+   "n_specs": 10,
+   "splits": {
+    "heldout": 10
+   }
+  },
+  {
+   "topology_id": "topology_v2_0003",
+   "stages": 2,
+   "comp": "miller",
+   "buffer": false,
+   "fb": false,
+   "n_specs": 9,
+   "splits": {
+    "heldout": 9
+   }
+  },
+  {
+   "topology_id": "topology_v2_0004",
+   "stages": 2,
+   "comp": "miller",
+   "buffer": false,
+   "fb": false,
+   "n_specs": 8,
+   "splits": {
+    "blindtest": 8
+   }
+  },
+  {
+   "topology_id": "topology_v2_0093",
+   "stages": 2,
+   "comp": "none",
+   "buffer": false,
+   "fb": false,
+   "n_specs": 7,
+   "splits": {
+    "train": 7
+   }
+  },
+  {
+   "topology_id": "topology_v2_0094",
+   "stages": 2,
+   "comp": "miller",
+   "buffer": false,
+   "fb": false,
+   "n_specs": 8,
+   "splits": {
+    "train": 8
+   }
+  },
+  {
+   "topology_id": "topology_v2_0132",
+   "stages": 2,
+   "comp": "miller",
+   "buffer": false,
+   "fb": false,
+   "n_specs": 5,
+   "splits": {
+    "train": 5
+   }
+  }
+ ]
+}

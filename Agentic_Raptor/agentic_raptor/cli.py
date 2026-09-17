@@ -1,4 +1,4 @@
-"""Agentic RAPTOR command-line interface.
+"""RAPTOR command-line interface.
 
 Run from the Agentic_Raptor directory (or after `pip install -e .`):
 
@@ -257,7 +257,7 @@ def _cmd_run_episode(args: argparse.Namespace, smoke: bool = False) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="agentic_raptor", description="Agentic RAPTOR CLI")
+    parser = argparse.ArgumentParser(prog="agentic_raptor", description="RAPTOR CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("inspect-repository", help="show legacy RAPTOR module availability")

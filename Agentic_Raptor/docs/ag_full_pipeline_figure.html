@@ -1,0 +1,328 @@
+<title>AG-Full Pipeline</title>
+<style>
+  :root{
+    --bg:#F6F4EE; --surface:#FFFFFF; --ink:#1C1E22; --ink-soft:#5B5F66; --line:#DAD4C7;
+    --stage1:#3E5C76; --stage1-bg:#E8EDF2; --stage1-line:#B9C7D3;
+    --stage2:#2E7D6B; --stage2-bg:#E3F1EC; --stage2-line:#AFD3C6;
+    --stage3:#B8752E; --stage3-bg:#F7EBDB; --stage3-line:#E3C393;
+    --stage4:#A3432F; --stage4-bg:#F4E2DC; --stage4-line:#DDB0A4;
+    --ledger:#6B6458; --ledger-bg:#EFEBE1;
+    --mono-chip:#EDEAE1;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#15171B; --surface:#1D2024; --ink:#ECE9E2; --ink-soft:#A6A29A; --line:#33363B;
+      --stage1:#8FB2D6; --stage1-bg:#1E2A36; --stage1-line:#31465C;
+      --stage2:#7FCBB4; --stage2-bg:#17332A; --stage2-line:#26503F;
+      --stage3:#E3A75E; --stage3-bg:#332417; --stage3-line:#523719;
+      --stage4:#E08B72; --stage4-bg:#341F19; --stage4-line:#54301F;
+      --ledger:#B7AFA0; --ledger-bg:#211F1B;
+      --mono-chip:#24272C;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#15171B; --surface:#1D2024; --ink:#ECE9E2; --ink-soft:#A6A29A; --line:#33363B;
+    --stage1:#8FB2D6; --stage1-bg:#1E2A36; --stage1-line:#31465C;
+    --stage2:#7FCBB4; --stage2-bg:#17332A; --stage2-line:#26503F;
+    --stage3:#E3A75E; --stage3-bg:#332417; --stage3-line:#523719;
+    --stage4:#E08B72; --stage4-bg:#341F19; --stage4-line:#54301F;
+    --ledger:#B7AFA0; --ledger-bg:#211F1B;
+    --mono-chip:#24272C;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",system-ui,sans-serif;
+    padding:28px 20px 48px; display:flex; justify-content:center;
+  }
+  .page{max-width:1240px; width:100%}
+  header{margin-bottom:22px}
+  h1{
+    font-size:1.5rem; font-weight:700; margin:0 0 6px; letter-spacing:-0.01em;
+    text-wrap:balance;
+  }
+  header p{margin:0; color:var(--ink-soft); font-size:1.02rem; max-width:70ch; line-height:1.55}
+  figure{margin:0 0 30px; background:var(--surface); border:1px solid var(--line);
+    border-radius:14px; padding:18px 18px 10px;}
+  svg{width:100%; height:auto; display:block}
+  figcaption{font-size:0.94rem; color:var(--ink-soft); padding:12px 6px 4px;
+    border-top:1px solid var(--line); margin-top:10px; line-height:1.6}
+  figcaption b{color:var(--ink); font-weight:600}
+
+  .stagegrid{
+    display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:22px;
+  }
+  @media (max-width:900px){ .stagegrid{grid-template-columns:1fr} }
+  .stagecard{
+    background:var(--surface); border:1px solid var(--line); border-radius:12px;
+    padding:18px 18px 16px; border-top:4px solid var(--c);
+  }
+  .stagecard .num{
+    font-family:"IBM Plex Mono",monospace; font-size:0.82rem; color:var(--c);
+    font-weight:600; letter-spacing:0.04em;
+  }
+  .stagecard h2{font-size:1.18rem; margin:3px 0 12px; font-weight:700}
+  .stagecard .row{margin-bottom:11px}
+  .stagecard .label{
+    font-size:0.78rem; text-transform:uppercase; letter-spacing:0.06em;
+    color:var(--ink-soft); font-weight:600; margin-bottom:3px;
+  }
+  .stagecard .val{font-size:0.98rem; line-height:1.5}
+  .stagecard code{
+    font-family:"IBM Plex Mono",monospace; font-size:0.9rem; background:var(--mono-chip);
+    padding:1px 6px; border-radius:5px;
+  }
+  .stagecard ul{margin:2px 0 0; padding-left:18px; font-size:0.98rem; line-height:1.55}
+  .stagecard ul li{margin-bottom:5px}
+
+  .foot{font-size:0.9rem; color:var(--ink-soft); border-top:1px solid var(--line);
+    padding-top:14px; line-height:1.7}
+  .foot code{font-family:"IBM Plex Mono",monospace; background:var(--mono-chip);
+    padding:1px 6px; border-radius:5px; font-size:0.88rem;}
+</style>
+
+<div class="page">
+<header>
+  <h1>AG-Full: specification to verified design</h1>
+  <p>Four agents share one blackboard (<code>DesignState</code>) and one hard budget
+  (<code>BudgetLedger</code>, capped at the baseline's own SPICE/LLM spend). Each box below is
+  one agent; the diagram shows what crosses the boundary between them, not just their names.</p>
+</header>
+
+<figure>
+<svg viewBox="0 0 1440 820" role="img" aria-label="Flow diagram: a specification enters Topology Generation, where a deterministic Design-Planner sets a difficulty-based plan, RAG retrieves up to six past measured records as context, and an SFT-tuned LLM proposer generates and validates the first candidate pool; the Topology Critic critiques that pool and, if unsatisfied, sends feedback back to re-generate, then a contextual bandit selects the top two candidates; the Optimization Supervisor probes both, allocates the shared budget to the stronger branch, sizes it with SAC, and either passes to Final Result or, on failure, hands off to the Recovery Agent which spends only banked calls on one bounded re-size; a BudgetLedger bar underneath shows the shared cap threading through the Critic, Supervisor and Recovery stages.">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+    <marker id="arrowFail" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--stage4)"/>
+    </marker>
+  </defs>
+
+  <!-- ============ SPECIFICATION ============ -->
+  <rect x="60" y="24" width="280" height="100" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5"/>
+  <text x="200" y="54" text-anchor="middle" font-size="16" font-weight="700" fill="var(--ink)" font-family="IBM Plex Sans">SPECIFICATION</text>
+  <text x="200" y="80" text-anchor="middle" font-size="14" fill="var(--ink-soft)" font-family="IBM Plex Mono">gain, ugbw, pm, C_load</text>
+  <text x="200" y="104" text-anchor="middle" font-size="12.5" fill="var(--ink-soft)" font-family="IBM Plex Sans">one of 29 specs &#215; 3 seeds</text>
+
+  <line x1="200" y1="124" x2="200" y2="170" stroke="currentColor" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="214" y="152" font-size="13" fill="var(--ink-soft)" font-family="IBM Plex Mono">spec dict</text>
+
+  <!-- ============ STAGE 1: TOPOLOGY GENERATION ============ -->
+  <g>
+    <rect x="40" y="174" width="300" height="316" rx="12" fill="var(--stage1-bg)" stroke="var(--stage1-line)" stroke-width="1.5"/>
+    <rect x="40" y="174" width="300" height="42" rx="12" fill="var(--stage1)"/>
+    <rect x="40" y="200" width="300" height="16" fill="var(--stage1)"/>
+    <text x="190" y="202" text-anchor="middle" font-size="16" font-weight="700" fill="#fff" font-family="IBM Plex Sans">1 &#183; TOPOLOGY GENERATION</text>
+
+    <rect x="56" y="228" width="268" height="140" rx="8" fill="var(--surface)" stroke="var(--stage1-line)"/>
+    <text x="70" y="252" font-size="14" font-weight="700" fill="var(--stage1)" font-family="IBM Plex Mono">Plan &amp; Retrieve</text>
+    <line x1="70" y1="262" x2="310" y2="262" stroke="var(--stage1-line)"/>
+    <text x="70" y="282" font-size="12.5" fill="var(--ink)" font-family="IBM Plex Sans"><tspan font-weight="600">Plan:</tspan> difficulty &#8594; asks for 4/5/6</text>
+    <text x="70" y="298" font-size="11.5" fill="var(--ink-soft)" font-family="IBM Plex Sans">topologies &#8212; no LLM call, plain arithmetic</text>
+    <text x="70" y="326" font-size="12.5" fill="var(--ink)" font-family="IBM Plex Sans"><tspan font-weight="600">RAG:</tspan> k=6 past measured examples,</text>
+    <text x="70" y="342" font-size="11.5" fill="var(--ink-soft)" font-family="IBM Plex Sans">max 2/family &#8212; context only, not a candidate</text>
+    <text x="70" y="360" font-size="11" font-weight="600" fill="var(--stage1)" font-family="IBM Plex Sans">both feed ONE prompt &#8594;</text>
+
+    <line x1="190" y1="368" x2="190" y2="382" stroke="currentColor" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+    <rect x="56" y="386" width="268" height="96" rx="8" fill="var(--surface)" stroke="var(--stage1-line)"/>
+    <text x="70" y="410" font-size="14" font-weight="700" fill="var(--stage1)" font-family="IBM Plex Mono">LLM Proposer</text>
+    <text x="70" y="432" font-size="12.5" fill="var(--ink)" font-family="IBM Plex Sans">SFT-tuned model generates that many</text>
+    <text x="70" y="448" font-size="12.5" fill="var(--ink)" font-family="IBM Plex Sans">candidate topology graphs</text>
+    <text x="70" y="466" font-size="11.5" fill="var(--ink-soft)" font-family="IBM Plex Sans">validated + deduped &#8212; shortfall reported,</text>
+    <text x="70" y="480" font-size="11.5" fill="var(--ink-soft)" font-family="IBM Plex Sans">never padded to look like it hit the target</text>
+  </g>
+
+  <!-- feedback loop arc, stage2 -> stage1 -->
+  <path d="M 560 174 C 560 106, 300 106, 300 174" fill="none" stroke="var(--stage2)" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+  <text x="430" y="98" text-anchor="middle" font-size="13" font-weight="600" fill="var(--stage2)" font-family="IBM Plex Mono">critic feedback &#8594; re-prompt</text>
+
+  <polyline points="340,441 364,441 364,300 378,300" fill="none" stroke="currentColor" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="346" y="432" font-size="13" font-weight="600" fill="var(--ink-soft)" font-family="IBM Plex Mono">candidate pool</text>
+
+  <!-- ============ STAGE 2: TOPOLOGY CRITIC ============ -->
+  <g>
+    <rect x="380" y="174" width="300" height="316" rx="12" fill="var(--stage2-bg)" stroke="var(--stage2-line)" stroke-width="1.5"/>
+    <rect x="380" y="174" width="300" height="42" rx="12" fill="var(--stage2)"/>
+    <rect x="380" y="200" width="300" height="16" fill="var(--stage2)"/>
+    <text x="530" y="202" text-anchor="middle" font-size="16" font-weight="700" fill="#fff" font-family="IBM Plex Sans">2 &#183; TOPOLOGY CRITIC</text>
+
+    <rect x="396" y="228" width="268" height="150" rx="8" fill="var(--surface)" stroke="var(--stage2-line)"/>
+    <text x="410" y="252" font-size="14" font-weight="700" fill="var(--stage2)" font-family="IBM Plex Mono">Critique</text>
+    <text x="410" y="274" font-size="12.5" fill="var(--ink)" font-family="IBM Plex Sans">stage-count + compensation</text>
+    <text x="410" y="292" font-size="12.5" fill="var(--ink)" font-family="IBM Plex Sans">coverage vs. the plan &#8212; rule-based</text>
+    <text x="410" y="316" font-size="13" font-weight="600" fill="var(--stage2)" font-family="IBM Plex Sans">unsatisfied &#8594; re-prompt</text>
+    <text x="410" y="334" font-size="11.5" fill="var(--ink-soft)" font-family="IBM Plex Sans">&#8804;3 rounds, same LLM cap as baseline</text>
+    <text x="410" y="358" font-size="11.5" fill="var(--ink-soft)" font-family="IBM Plex Sans">zero extra LLM cost to critique itself</text>
+
+    <line x1="530" y1="378" x2="530" y2="392" stroke="currentColor" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+    <rect x="396" y="396" width="268" height="86" rx="8" fill="var(--surface)" stroke="var(--stage2-line)"/>
+    <text x="410" y="420" font-size="14" font-weight="700" fill="var(--stage2)" font-family="IBM Plex Mono">Bandit Top-2</text>
+    <text x="410" y="442" font-size="12.5" fill="var(--ink)" font-family="IBM Plex Sans">24-feature linear score, hash-pinned</text>
+    <text x="410" y="464" font-size="11.5" fill="var(--ink-soft)" font-family="IBM Plex Sans">picks committed + backup branch</text>
+  </g>
+
+  <line x1="680" y1="345" x2="718" y2="345" stroke="currentColor" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="684" y="336" font-size="13" font-weight="600" fill="var(--ink-soft)" font-family="IBM Plex Mono">top-2 candidates</text>
+
+  <!-- ============ STAGE 3: OPTIMIZATION SUPERVISOR ============ -->
+  <g>
+    <rect x="720" y="174" width="300" height="316" rx="12" fill="var(--stage3-bg)" stroke="var(--stage3-line)" stroke-width="1.5"/>
+    <rect x="720" y="174" width="300" height="42" rx="12" fill="var(--stage3)"/>
+    <rect x="720" y="200" width="300" height="16" fill="var(--stage3)"/>
+    <text x="870" y="202" text-anchor="middle" font-size="16" font-weight="700" fill="#fff" font-family="IBM Plex Sans">3 &#183; OPT. SUPERVISOR</text>
+
+    <rect x="736" y="228" width="268" height="76" rx="8" fill="var(--surface)" stroke="var(--stage3-line)"/>
+    <text x="750" y="252" font-size="14" font-weight="700" fill="var(--stage3)" font-family="IBM Plex Mono">Probe</text>
+    <text x="750" y="274" font-size="12.5" fill="var(--ink)" font-family="IBM Plex Sans">3 SPICE calls/branch, real SAC</text>
+    <text x="750" y="292" font-size="11.5" fill="var(--ink-soft)" font-family="IBM Plex Sans">hopeless / stagnating / improving</text>
+
+    <line x1="870" y1="304" x2="870" y2="318" stroke="currentColor" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+    <rect x="736" y="322" width="268" height="62" rx="8" fill="var(--surface)" stroke="var(--stage3-line)"/>
+    <text x="750" y="346" font-size="14" font-weight="700" fill="var(--stage3)" font-family="IBM Plex Mono">Allocate</text>
+    <text x="750" y="368" font-size="12.5" fill="var(--ink)" font-family="IBM Plex Sans">remaining budget &#8594; stronger branch</text>
+
+    <line x1="870" y1="384" x2="870" y2="398" stroke="currentColor" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+    <rect x="736" y="402" width="268" height="80" rx="8" fill="var(--surface)" stroke="var(--stage3-line)"/>
+    <text x="750" y="426" font-size="14" font-weight="700" fill="var(--stage3)" font-family="IBM Plex Mono">SAC Size + Polish</text>
+    <text x="750" y="448" font-size="12.5" fill="var(--ink)" font-family="IBM Plex Sans">sizes to verify, then banked calls</text>
+    <text x="750" y="464" font-size="12.5" fill="var(--ink)" font-family="IBM Plex Sans">polish FoM &#8212; a pass is never lost</text>
+  </g>
+
+  <!-- pass path -->
+  <line x1="1020" y1="280" x2="1078" y2="280" stroke="var(--stage2)" stroke-width="2.2" marker-end="url(#arrow)"/>
+  <text x="1024" y="270" font-size="13" font-weight="700" fill="var(--stage2)" font-family="IBM Plex Mono">PASS</text>
+
+  <!-- fail path down to recovery -->
+  <line x1="870" y1="490" x2="870" y2="522" stroke="var(--stage4)" stroke-width="2.2" stroke-dasharray="6 5" marker-end="url(#arrowFail)"/>
+  <text x="884" y="510" font-size="13" font-weight="700" fill="var(--stage4)" font-family="IBM Plex Mono">verification FAILED</text>
+
+  <!-- ============ STAGE 4: RECOVERY AGENT ============ -->
+  <g>
+    <rect x="720" y="526" width="300" height="180" rx="12" fill="var(--stage4-bg)" stroke="var(--stage4-line)" stroke-width="1.5"/>
+    <rect x="720" y="526" width="300" height="42" rx="12" fill="var(--stage4)"/>
+    <rect x="720" y="552" width="300" height="16" fill="var(--stage4)"/>
+    <text x="870" y="554" text-anchor="middle" font-size="16" font-weight="700" fill="#fff" font-family="IBM Plex Sans">4 &#183; RECOVERY AGENT</text>
+    <text x="870" y="588" text-anchor="middle" font-size="12" font-family="IBM Plex Sans" fill="var(--ink-soft)">runs at most once, only after a failed pass</text>
+
+    <rect x="736" y="598" width="268" height="52" rx="8" fill="var(--surface)" stroke="var(--stage4-line)"/>
+    <text x="750" y="620" font-size="14" font-weight="700" fill="var(--stage4)" font-family="IBM Plex Mono">Diagnose</text>
+    <text x="750" y="640" font-size="12" fill="var(--ink)" font-family="IBM Plex Sans">real gain/PM/UGBW gap, measured</text>
+
+    <line x1="870" y1="650" x2="870" y2="664" stroke="currentColor" stroke-width="1.4" marker-end="url(#arrow)"/>
+
+    <rect x="736" y="668" width="268" height="46" rx="8" fill="var(--surface)" stroke="var(--stage4-line)"/>
+    <text x="750" y="690" font-size="14" font-weight="700" fill="var(--stage4)" font-family="IBM Plex Mono">Decide</text>
+    <text x="750" y="708" font-size="12" fill="var(--ink)" font-family="IBM Plex Sans">&#8805;4 banked &#8594; resize backup, else none</text>
+  </g>
+
+  <!-- recovery -> final result -->
+  <line x1="1020" y1="632" x2="1078" y2="460" stroke="var(--stage4)" stroke-width="2.2" marker-end="url(#arrowFail)"/>
+  <text x="1006" y="558" font-size="13" font-weight="700" fill="var(--stage4)" font-family="IBM Plex Mono">rescued / honest failure</text>
+
+  <!-- ============ FINAL RESULT ============ -->
+  <g>
+    <rect x="1080" y="248" width="300" height="248" rx="12" fill="var(--surface)" stroke="var(--line)" stroke-width="2"/>
+    <text x="1230" y="280" text-anchor="middle" font-size="16" font-weight="700" fill="var(--ink)" font-family="IBM Plex Sans">FINAL RESULT</text>
+    <line x1="1100" y1="294" x2="1360" y2="294" stroke="var(--line)"/>
+    <text x="1100" y="320" font-size="13.5" fill="var(--ink)" font-family="IBM Plex Mono">pass, gain, PM, UGBW</text>
+    <text x="1100" y="342" font-size="13.5" fill="var(--ink)" font-family="IBM Plex Mono">bias current, power, FoM</text>
+    <text x="1100" y="368" font-size="12" fill="var(--ink-soft)" font-family="IBM Plex Sans">+ full trace: plan, ledger, critic</text>
+    <text x="1100" y="384" font-size="12" fill="var(--ink-soft)" font-family="IBM Plex Sans">feedback, probes, recovery log</text>
+    <text x="1100" y="412" font-size="12.5" font-weight="600" fill="var(--stage3)" font-family="IBM Plex Sans">optional PVT sweep:</text>
+    <text x="1100" y="430" font-size="12" fill="var(--stage3)" font-family="IBM Plex Sans">SS/TT/FF &#215; 1.62/1.98V &#215; 0/70&#176;C</text>
+    <text x="1100" y="446" font-size="12" fill="var(--stage3)" font-family="IBM Plex Sans">12 conditions, fraction passing</text>
+  </g>
+
+  <!-- ============ LEDGER BAR ============ -->
+  <rect x="380" y="726" width="1000" height="70" rx="10" fill="var(--ledger-bg)" stroke="var(--ledger)" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="880" y="752" text-anchor="middle" font-size="14" font-weight="700" fill="var(--ledger)" font-family="IBM Plex Mono">BudgetLedger</text>
+  <text x="880" y="772" text-anchor="middle" font-size="12" fill="var(--ink-soft)" font-family="IBM Plex Sans">shared SPICE + LLM cap &#8212; agentic spend &#8804; baseline&#8217;s own budget, never more</text>
+
+  <line x1="530" y1="490" x2="530" y2="722" stroke="var(--ledger)" stroke-width="1.6" stroke-dasharray="4 4" marker-end="url(#arrow)"/>
+  <text x="540" y="612" font-size="12" font-weight="600" fill="var(--ledger)" font-family="IBM Plex Mono">llm attempts</text>
+
+  <line x1="1035" y1="706" x2="1035" y2="722" stroke="var(--ledger)" stroke-width="1.6" stroke-dasharray="4 4" marker-end="url(#arrow)"/>
+  <text x="1045" y="718" font-size="12" font-weight="600" fill="var(--ledger)" font-family="IBM Plex Mono">SPICE spend / bank</text>
+</svg>
+<figcaption>
+<b>Figure.</b> One pipeline run for one (specification, seed) pair. Solid arrows are the
+committed path; the dashed teal arc is the Critic's re-prompt loop; the dashed terracotta path
+is the conditional Recovery branch, taken only after a failed verification. The ledger bar is
+not a fifth agent &#8212; it is the single shared budget every other box reads from and writes to,
+which is what makes the fairness invariant (agentic spend &#8804; baseline spend) auditable rather
+than asserted. <b>Implementation note:</b> Topology Generation's round-0 proposal and the
+Critic's feedback-conditioned re-prompts are issued by the same function
+(<code>critic.run_critic_loop</code>); the boundary drawn here is the conceptual one &#8212; plan
+plus first proposal vs. critique-driven iteration and selection &#8212; not a separate function call.
+</figcaption>
+</figure>
+
+<div class="stagegrid">
+  <div class="stagecard" style="--c:var(--stage1)">
+    <div class="num">STAGE 1</div>
+    <h2>Topology Generation</h2>
+    <div class="row"><div class="label">Input</div><div class="val">Target spec: <code>gain_target_db</code>, <code>ugbw_target_hz</code>, <code>phase_margin_target_deg</code>, <code>load_capacitance_pf</code></div></div>
+    <div class="row"><div class="label">Does</div><ul>
+      <li><b>Design-Planner:</b> deterministically scores gm-demand (2&#960;&#183;UGBW&#183;C<sub>L</sub>) and gain against measured per-stage-count TRAIN ceilings, classifies difficulty (easy/medium/hard), sets a soft stage-count / compensation prior &#8212; no LLM call</li>
+      <li><b>RAG:</b> spec-conditioned retrieval of up to 6 past MEASURED records (successes and failures), capped at 2 per family for diversity &#8212; context only, never injected as a candidate itself</li>
+      <li><b>LLM Proposer:</b> an SFT-tuned adapter (fine-tuned once offline, zero SPICE in that loop) generates from the plan- and evidence-conditioned prompt; a 14-rule structural validator canonicalises and dedupes the result</li>
+    </ul></div>
+    <div class="row"><div class="label">Output</div><div class="val"><code>StrategyPlan</code> + validated candidate pool</div></div>
+  </div>
+
+  <div class="stagecard" style="--c:var(--stage2)">
+    <div class="num">STAGE 2</div>
+    <h2>Topology Critic</h2>
+    <div class="row"><div class="label">Input</div><div class="val">Candidate pool + <code>StrategyPlan</code></div></div>
+    <div class="row"><div class="label">Does</div><ul>
+      <li>Checks the pool against the plan's own physics rules (stage coverage, compensation, hard-spec deep-comp) &#8212; deterministic, free</li>
+      <li>If unsatisfied, appends targeted feedback and requests another round from the same proposer (&#8804;3 rounds, same LLM-attempt cap as the baseline)</li>
+      <li>Once satisfied, a hash-pinned linear contextual bandit (24 physical features) ranks the pool</li>
+    </ul></div>
+    <div class="row"><div class="label">Output</div><div class="val">Top-2 candidates: one committed, one backup</div></div>
+  </div>
+
+  <div class="stagecard" style="--c:var(--stage3)">
+    <div class="num">STAGE 3</div>
+    <h2>Optimization Supervisor</h2>
+    <div class="row"><div class="label">Input</div><div class="val">Committed + backup candidates, shared <code>BudgetLedger</code></div></div>
+    <div class="row"><div class="label">Does</div><ul>
+      <li>Probes both branches cheaply (3 SPICE calls each) with the real SAC sizer</li>
+      <li>Diagnoses each branch's trajectory (hopeless / stagnating / improving) and routes the remaining budget to the stronger one, banking the rest</li>
+      <li>Continues SAC sizing to verification; banked calls polish FoM after a pass without ever risking it</li>
+    </ul></div>
+    <div class="row"><div class="label">Output</div><div class="val">Sized, verified design (pass/fail + measurements) and any leftover banked calls</div></div>
+  </div>
+
+  <div class="stagecard" style="--c:var(--stage4)">
+    <div class="num">STAGE 4</div>
+    <h2>Recovery Agent</h2>
+    <div class="row"><div class="label">Input</div><div class="val">A <em>failed</em> verification + whatever calls are banked</div></div>
+    <div class="row"><div class="label">Does</div><ul>
+      <li>Diagnoses the authoritative gain/PM/UGBW gap from the real measurement only</li>
+      <li>Fires at most once per run, and only if &#8805;4 calls are banked; otherwise reports <code>NONE</code></li>
+      <li>Spends only banked calls &#8212; never a fresh charge against the cap &#8212; to re-size the untried backup branch</li>
+    </ul></div>
+    <div class="row"><div class="label">Output</div><div class="val">A rescued passing design, or the original failure reported unchanged</div></div>
+  </div>
+</div>
+
+<div class="foot">
+Source, verified against code (2026-09-15): <code>agentic_raptor/agents/planner.py</code>,
+<code>critic.py</code>, <code>supervisor.py</code>, <code>recovery.py</code>, <code>state.py</code>;
+pipeline order (<code>stage1_spec</code> &#8594; <code>stage2_rag</code> &#8594; <code>stage3_propose</code>)
+and RAG retrieval (<code>retrieve()</code>, k=6, max 2/family) in <code>run_raptor_v2.py</code>;
+generation call in <code>run_raptor_v2.py::propose_and_validate</code>; SFT adapter loaded as a
+PEFT checkpoint (<code>adapter_config.json</code>) in <code>run_qwen_ablation.py::_load</code>,
+fine-tuned offline (measured 528.7s wall, 1,500 steps, 917 records, zero SPICE in that loop);
+selector in <code>agentic_raptor/topology_rl/bandit_selector.py</code>. All four agents
+communicate only through <code>DesignState</code> &#8212; without it this would be four renamed
+pipeline stages, not agents that share context.
+</div>
+</div>

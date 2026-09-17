@@ -1,6 +1,6 @@
 ablation_id: A9
 name: NO_SELF_IMPROVEMENT_STATIC
-question: Does measured design experience improve future Agentic RAPTOR performance?
+question: Does measured design experience improve future RAPTOR performance?
   (run via generation_state.py, not this A0-A8 paired runner)
 use_llm: true
 use_rag: true

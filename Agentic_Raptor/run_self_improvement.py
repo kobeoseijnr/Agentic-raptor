@@ -1,4 +1,4 @@
-"""Agentic RAPTOR self-improvement loop — repaired, campaign-based.
+"""RAPTOR self-improvement loop — repaired, campaign-based.
 
 Each GENERATION (continuity: gen N+1 starts from gen N's ACCEPTED checkpoint):
   1. SFT   — continue training the accepted parent adapter on corpus +

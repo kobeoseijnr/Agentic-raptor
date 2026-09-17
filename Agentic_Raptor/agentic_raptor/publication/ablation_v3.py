@@ -275,7 +275,7 @@ A8_NO_DPO = AblationConfig(
 
 A9_STATIC = AblationConfig(
     "A9", "NO_SELF_IMPROVEMENT_STATIC",
-    "Does measured design experience improve future Agentic RAPTOR "
+    "Does measured design experience improve future RAPTOR "
     "performance? (run via generation_state.py, not this A0-A8 paired "
     "runner)", learning_mode="static")
 

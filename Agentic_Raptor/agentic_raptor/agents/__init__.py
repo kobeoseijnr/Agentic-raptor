@@ -1,4 +1,4 @@
-"""AGENTIC RAPTOR agents (2026-08-16).
+"""RAPTOR agents (2026-08-16).
 
 Four agents around the frozen pipeline core, communicating through a
 shared DesignState under a deterministic coordinator, spending inside a

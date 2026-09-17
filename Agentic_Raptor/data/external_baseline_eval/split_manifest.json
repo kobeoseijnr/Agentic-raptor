@@ -1,0 +1,165 @@
+{
+ "created": "2026-08-28",
+ "frozen_at_commit": "deb6af841865d5ee7d76d1c524224a14962045f6",
+ "source_registry_hash": "25af978c4bbb8ddd",
+ "source_corpus_hash": "98c7949294b1aa19",
+ "corpus_internal_split": {
+  "split_scheme": "family_grouped_stratified_v2_blind",
+  "split_seed": 0,
+  "corpus_hash": "9a44aa7caa30a6c7",
+  "split_hash": "22becbc27c029620",
+  "train_spec_ids": [
+   "t_boundary_topology_0002",
+   "t_boundary_topology_0003",
+   "t_boundary_topology_0011",
+   "t_boundary_topology_0013",
+   "t_boundary_topology_0014",
+   "t_boundary_topology_0015",
+   "t_boundary_topology_v2_0001",
+   "t_boundary_topology_v2_0093",
+   "t_boundary_topology_v2_0094",
+   "t_boundary_topology_v2_0132",
+   "t_easy_topology_0002",
+   "t_easy_topology_0003",
+   "t_easy_topology_0011",
+   "t_easy_topology_0013",
+   "t_easy_topology_0014",
+   "t_easy_topology_0015",
+   "t_easy_topology_v2_0093",
+   "t_easy_topology_v2_0094",
+   "t_easy_topology_v2_0132",
+   "t_hard_topology_0002",
+   "t_hard_topology_0003",
+   "t_hard_topology_0011",
+   "t_hard_topology_0013",
+   "t_hard_topology_0014",
+   "t_hard_topology_0015",
+   "t_hard_topology_v2_0001",
+   "t_hard_topology_v2_0093",
+   "t_hard_topology_v2_0094",
+   "t_heldout_topology_0002",
+   "t_heldout_topology_0003",
+   "t_heldout_topology_0011",
+   "t_heldout_topology_0013",
+   "t_heldout_topology_0014",
+   "t_heldout_topology_0015",
+   "t_heldout_topology_v2_0001",
+   "t_heldout_topology_v2_0093",
+   "t_heldout_topology_v2_0094",
+   "t_heldout_topology_v2_0132",
+   "t_validation_topology_0002",
+   "t_validation_topology_0003",
+   "t_validation_topology_0011",
+   "t_validation_topology_0013",
+   "t_validation_topology_0014",
+   "t_validation_topology_0015",
+   "t_validation_topology_v2_0001",
+   "t_validation_topology_v2_0093",
+   "t_validation_topology_v2_0094",
+   "t_validation_topology_v2_0132"
+  ],
+  "train_family_ids": [
+   "topology_0002",
+   "topology_0003",
+   "topology_0011",
+   "topology_0013",
+   "topology_0014",
+   "topology_0015",
+   "topology_v2_0001",
+   "topology_v2_0093",
+   "topology_v2_0094",
+   "topology_v2_0132"
+  ],
+  "validation_spec_ids": [
+   "t_boundary_topology_0008",
+   "t_boundary_topology_v2_0002",
+   "t_boundary_topology_v2_0003",
+   "t_easy_topology_0008",
+   "t_easy_topology_v2_0002",
+   "t_easy_topology_v2_0003",
+   "t_hard_topology_0008",
+   "t_hard_topology_v2_0002",
+   "t_hard_topology_v2_0003",
+   "t_heldout_topology_0008",
+   "t_heldout_topology_v2_0002",
+   "t_heldout_topology_v2_0003",
+   "t_validation_topology_0008",
+   "t_validation_topology_v2_0002",
+   "t_validation_topology_v2_0003"
+  ],
+  "validation_family_ids": [
+   "topology_0008",
+   "topology_v2_0002",
+   "topology_v2_0003"
+  ],
+  "blind_test_spec_ids": [
+   "t_boundary_topology_0005",
+   "t_boundary_topology_0009",
+   "t_boundary_topology_v2_0004",
+   "t_easy_topology_0005",
+   "t_easy_topology_0009",
+   "t_easy_topology_v2_0004",
+   "t_hard_topology_0005",
+   "t_hard_topology_0009",
+   "t_hard_topology_v2_0004",
+   "t_heldout_topology_0005",
+   "t_heldout_topology_0009",
+   "t_heldout_topology_v2_0004",
+   "t_validation_topology_0005",
+   "t_validation_topology_0009",
+   "t_validation_topology_v2_0004"
+  ],
+  "blind_test_family_ids": [
+   "topology_0005",
+   "topology_0009",
+   "topology_v2_0004"
+  ]
+ },
+ "files": {
+  "specs_train.json": {
+   "n": 85,
+   "sha256_16": "f31991bc35a31b89"
+  },
+  "specs_validation.json": {
+   "n": 29,
+   "sha256_16": "8015b7a40ecfb085"
+  },
+  "specs_test.json": {
+   "n": 28,
+   "sha256_16": "a1e924ba3abdc215"
+  }
+ },
+ "split_semantics": {
+  "specs_train.json": "85 specs -- the ONLY split any model/baseline may train on (AG SFT/models already trained here; AutoCkt PPO will train here)",
+  "specs_validation.json": "29 specs (= sealed 'heldout') -- development/pilot evaluation. DISCLOSED: the Tier-3 HELDOUT29 campaign already evaluated AG arms on this split, so it is NOT zero-contact for AG -- hence validation, never test.",
+  "specs_test.json": "28 specs (= sealed 'blindtest') -- paper test set, untouched by every AG campaign to date (BLIND_SEAL discipline); consumed once for the final paper runs."
+ },
+ "disjointness": {
+  "train\u2229heldout": {
+   "spec_hash_overlap": 0,
+   "context_id_overlap": 0
+  },
+  "train\u2229blindtest": {
+   "spec_hash_overlap": 0,
+   "context_id_overlap": 0
+  },
+  "heldout\u2229blindtest": {
+   "spec_hash_overlap": 0,
+   "context_id_overlap": 0
+  }
+ },
+ "topology_family_overlap": {
+  "note": "MEASURED: splits are spec-disjoint (0 spec_hash / context_id overlap) AND topology-instance-disjoint (0 topology_id overlap on every pair). Family CLASSES (e.g. 2-stage miller) can recur across splits by construction of the 5-family library; claims should say 'unseen specs and unseen topology instances', not 'unseen circuit classes'.",
+  "overlap": {
+   "train\u2229heldout": [],
+   "train\u2229blindtest": [],
+   "heldout\u2229blindtest": []
+  }
+ },
+ "baseline_overlap_documentation": {
+  "AnalogCoderPro": "trained on nothing of ours (pretrained LLM); its 45-problem set is disjoint from this benchmark",
+  "PANDA": "no training; LLM pretrained; templates independent",
+  "AutoCkt": "will be TRAINED on specs_train ranges only (its native protocol trains on random specs from ranges); training cost reported",
+  "MACE": "no training"
+ }
+}

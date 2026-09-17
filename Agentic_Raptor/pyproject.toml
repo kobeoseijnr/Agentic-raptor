@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agentic-raptor"
 version = "0.1.0"
-description = "Agentic RAPTOR: multimodal specification parsing, RAG-conditioned topology generation, AlphaZero-inspired topology RL, graph-conditioned MB-SAC sizing, and SPICE-based cross-level credit assignment."
+description = "RAPTOR: multimodal specification parsing, RAG-conditioned topology generation, AlphaZero-inspired topology RL, graph-conditioned MB-SAC sizing, and SPICE-based cross-level credit assignment."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

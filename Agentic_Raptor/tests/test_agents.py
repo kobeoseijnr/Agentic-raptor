@@ -1,4 +1,4 @@
-"""AGENTIC RAPTOR (2026-08-16): Design Planner, Topology Critic,
+"""RAPTOR (2026-08-16): Design Planner, Topology Critic,
 Optimization Supervisor, Recovery Agent + DesignState/BudgetLedger +
 pipeline wiring. Zero LLM, zero ngspice -- every agent decision is
 deterministic and testable from synthetic inputs."""

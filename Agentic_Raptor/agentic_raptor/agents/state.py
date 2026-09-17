@@ -1,6 +1,6 @@
 """Shared agent state: StrategyPlan, BudgetLedger, DesignState.
 
-AGENTIC RAPTOR (2026-08-16). The four agents (Design Planner, Topology
+RAPTOR (2026-08-16). The four agents (Design Planner, Topology
 Critic, Optimization Supervisor, Recovery) communicate ONLY through the
 DesignState a deterministic coordinator threads between them -- without
 shared state this would be another four-stage assembly line with each
