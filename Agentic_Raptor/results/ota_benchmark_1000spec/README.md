@@ -15,7 +15,7 @@ RAPTOR returns for that spec, judged with the benchmark's strict pass rule and F
 Columns: `spec_id`, `target_*` (gain dB, UGBW MHz, PM deg, Ibias A), `output_*` (delivered values),
 `fom`, per-metric pass flags, `complete_pass`, `sims_used`, `first_pass_sim`, `budget`, `seed`,
 `params_idx` (10 grid indices of the returned design: nf_bias|nf_tail|nf_in|nf_md|nf_mo|nf_sum|nf_cs|nf_csn|cc|rz),
-`runtime_sec`, and the agent bookkeeping fields (`distinct_passing`, `committed_branch`,
+`runtime_sec`, `sizing_parameters` (the same design decoded to physical values: finger counts, cc in pF, rz in kΩ), and the agent bookkeeping fields (`distinct_passing`, `committed_branch`,
 `probe_verdict_a/b`, `banked_final`, `recovery_executed`, `plan_difficulty`).
 
 Note: the benchmark netlist hard-codes cc = 1 pF and rz = 3 kΩ, so the last two indices are not
